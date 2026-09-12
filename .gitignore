@@ -1,0 +1,24 @@
+# --- Build artifacts ---
+/target/
+
+# --- Runtime data (never commit: may contain secrets / payloads) ---
+# Live deployment config with real secrets (passphrase, api keys, tokens).
+# Use config.example.yml as the committed template instead.
+config.yml
+/config.yml
+
+# SQLite history + WAL
+history.db
+history.db-shm
+history.db-wal
+
+# Run-state / scheduled-job state
+state.json
+
+# Backups and logs
+/backup/
+/logs/
+
+# --- Editor / OS noise ---
+.DS_Store
+*.swp
