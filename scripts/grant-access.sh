@@ -44,6 +44,26 @@ setfacl -R -m "u:$U:rX" -- "$DEST"
 echo "setting default ACL so files the server creates later are also readable..."
 setfacl -R -d -m "u:$U:rX" -- "$DEST"
 
+# Grant traverse (execute) on every parent directory all the way up to /, so the
+# user can actually reach $DEST even if the hosting software later resets the
+# group/owner permissions of intermediate directories (e.g. Wings on restart).
+# NOTE: start at the parent — $DEST itself already got its recursive rX grant above.
+echo "granting $U traverse access on the parent path..."
+p="$(dirname "$DEST")"
+while :; do
+  [[ "$p" != "/" ]] && setfacl -m "u:$U:X" -- "$p"
+  parent="$(dirname "$p")"
+  [[ "$parent" == "$p" ]] && break
+  p="$parent"
+done
+
+# Sanity check: can $U really read the target now?
+if sudo -u "$U" test -r "$DEST" 2>/dev/null || runuser -u "$U" -- test -r "$DEST" 2>/dev/null; then
+  echo "verified: $U can read $DEST"
+else
+  echo "warning: could not verify read access for $U on $DEST (permissions check above)"
+fi
+
 echo
 echo "done. Backups now run without sudo:"
 echo "  backup-mgr run --config config.yml"
