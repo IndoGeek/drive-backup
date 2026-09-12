@@ -89,8 +89,15 @@ pub fn compress_dir(
         None => src_dir.to_path_buf(),
     };
     if !root.is_dir() {
+        let reason = match std::fs::metadata(&root) {
+            Ok(m) if m.is_dir() => {
+                "the directory exists but cannot be traversed (missing read/traverse permission)".to_string()
+            }
+            Ok(_) => "path exists but is not a directory".to_string(),
+            Err(e) => format!("cannot access path: {e}"),
+        };
         return Err(format!(
-            "backup path is not a directory: {}",
+            "backup path is not a directory: {} ({reason}). If you run the backup as a non-root user, first grant read+traverse access to it: sudo ./scripts/grant-access.sh $USER <backup-dir> (see README 'Prerequisites', requires the 'acl' package).",
             root.display()
         ));
     }
@@ -127,6 +134,10 @@ pub fn compress_dir(
         };
         let mut args: Vec<String> = flag.split_whitespace().map(String::from).collect();
         args.push(partial.to_string_lossy().to_string());
+        // Skip unreadable files (e.g. transient process-private files) instead of
+        // failing the whole backup. Any skipped files are reported as warnings
+        // below. This is what lets the tool run as a non-root user.
+        args.push("--ignore-failed-read".to_string());
         for p in excludes {
             args.push(format!("--exclude={}", p));
         }
@@ -143,13 +154,17 @@ pub fn compress_dir(
     let out = cmd
         .output()
         .map_err(|e| format!("failed to spawn {}: {e}", if compression == "zip" { "zip" } else { "tar" }))?;
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
     if !out.status.success() {
         let _ = std::fs::remove_file(&partial);
         return Err(format!(
             "compression failed (exit {:?}): {}",
             out.status.code(),
-            String::from_utf8_lossy(&out.stderr).trim()
+            stderr
         ));
+    }
+    if !stderr.is_empty() {
+        logger.warn(&format!("compression finished with warnings (unreadable/transient files were skipped):\n{}", stderr));
     }
     std::fs::rename(&partial, dst_file).map_err(|e| e.to_string())?;
     let size = std::fs::metadata(dst_file).map(|m| m.len()).unwrap_or(0);

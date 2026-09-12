@@ -271,7 +271,27 @@ fn run_backup(
         Some(s) => src.join(s),
         None => src.clone(),
     };
-    let estimated = backup::estimate_size(&est_root, &b.exclude_patterns).unwrap_or(0);
+    let estimated = match backup::estimate_size(&est_root, &b.exclude_patterns) {
+        Ok(n) => n,
+        Err(e) => {
+            let reason = format!(
+                "cannot read source to estimate its size: {e}. If you run the backup as a non-root user, first grant read+traverse access to the source directory: sudo ./scripts/grant-access.sh $USER <backup-dir> (see README 'Prerequisites', requires the 'acl' package)."
+            );
+            if opts.dry_run {
+                logger.warn(&format!("DRY RUN: {reason}"));
+                return Err(reason);
+            }
+            notify::send(
+                &cfg.inner.notifications.discord_webhook,
+                logger,
+                &notif_ctx(cfg),
+                &notify::Event::PreflightFail { reason: reason.clone() },
+            );
+            db_record(stage_label, &base_name, None, None, "-", "failed", &reason);
+            metrics_run(false, 0, start_inst.elapsed(), &base_name);
+            return fail(cfg, state_file, &mut st, logger, "preflight", &reason);
+        }
+    };
     let free = backup::free_bytes_on(&local_dir).unwrap_or(u64::MAX);
     if let Some(m) = metrics() {
         m.set_sizes(free, estimated);
@@ -1067,7 +1087,13 @@ fn main() {
     }
 
     let cfg = match (|| -> Result<Config, String> {
-        let tmp = Logger::new("/tmp", "error", 1).unwrap();
+        // Per-user bootstrap log dir (e.g. /tmp/backup-mgr-tanmay) so the
+        // pre-config phase never collides with another user's files.
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "backup-mgr-{}",
+            std::env::var("USER").unwrap_or_else(|_| "unknown".into())
+        ));
+        let tmp = Logger::new(&tmp_dir.to_string_lossy(), "error", 1).unwrap();
         ensure_config(&cfg_path, &tmp)?;
         Config::load(&cfg_path)
     })() {

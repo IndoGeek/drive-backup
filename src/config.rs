@@ -301,9 +301,10 @@ impl Config {
         let mut cfg = Config {
             inner,
             base_dir: path
-                .parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| PathBuf::from(".")),
+                .canonicalize()
+                .ok()
+                .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
         };
         cfg.normalize();
         Ok(cfg)

@@ -1,8 +1,8 @@
-# backup-mgr
+# Drive Backup
 
-Automatic game-server backup tool that archives your Pterodactyl server volume and pushes encrypted copies to Google Drive (with an optional second remote for redundancy), then notifies you on Discord.
+Automatic directory backup tool that archives your server directories and pushes encrypted copies to Google Drive (with an optional second remote for redundancy), then notifies you on Discord.
 
-Built and battle-tested for Linux servers. The current deployment runs on a Pterodactyl host (`panel.electropool.online`) backing up a Minecraft volume every night at 03:30 and pushing to Google Drive.
+Built and battle-tested for Linux servers. The current deployment runs on a Pterodactyl host (`www.example.com`) backing up a Minecraft volume every night at 03:30 and pushing to Google Drive.
 
 > **Status: production.** Full test suite verified against a local rclone remote and a fake webhook sink: fallback remote, AES256 encryption, restore, integrity check, world-only snapshots, retention, Discord embeds, metrics and dry-run all pass end-to-end.
 
@@ -33,6 +33,7 @@ What you need on the host before installing:
 | Software | Purpose | Install |
 |---|---|---|
 | `rclone` | Remote storage (Google Drive, B2, ...) | `apt install rclone` or [rclone.org](https://rclone.org/downloads/) |
+| `acl` (`setfacl`) | Lets a non-root user read/traverse the backup directory | `apt install acl` |
 | `gpg` (gnupg) | Archive encryption/decryption | `apt install gnupg` |
 | `tar`, `gzip` / `zstd` / `xz` / `bzip2` / `zip` | Compression backends (install per your `backup.compression`) | `apt install tar gzip zstd xz-utils zip` |
 | Rust toolchain (`cargo`) | Build | [rustup.rs](https://rustup.rs) |
@@ -47,7 +48,7 @@ Networking: the host must reach the Pterodactyl panel websocket **and** Google D
 
 ```bash
 # 1. clone
-git clone <your-repo-url> drive-backup && cd drive-backup
+git clone https://github.com/IndoGeek/drive-backup && cd drive-backup
 
 # 2. build (release)
 cargo build --release
@@ -82,6 +83,21 @@ The daemon reads `config.yml` **fresh on every start**, so after **any** config 
 ```bash
 pm2 restart backup-mgr
 ```
+
+> **Non-root deployment — recommended before your first manual backup.**
+> If you run `backup-mgr run` as a normal user and the machine replies with
+> `backup path is not a directory` / `cannot read source ...`, it means you lack
+> read+traverse permission on the directory you want to back up. The **only**
+> sudo step (besides installing the binary) is to grant it with the bundled helper:
+>
+> ```bash
+> sudo ./scripts/grant-access.sh $USER /var/lib/pterodactyl/volumes/<server-uuid>/
+> ```
+>
+> The script installs the `acl` package when `setfacl` is missing, then applies
+> read+traverse ACLs (plus default ACLs so files the server creates later are
+> also readable). If your host software resets permissions (e.g. after a server
+> restart) and the backup fails again, just re-run the script.
 
 ---
 
@@ -189,6 +205,18 @@ Exposes Prometheus-format counters/gauges (runs, failures, last durations, uploa
 
 ---
 
+## Running without root (per-user deployment)
+
+The tool is designed to run as a normal user — nothing needs root at runtime.
+
+- **One-time root steps only:** install the binary (`sudo install -m 0755 ...`) and grant access to the backup directory via [`scripts/grant-access.sh`](scripts/grant-access.sh) (or `sudo setfacl -R -m u:$USER:rX <dir>` plus `setfacl -R -d -m u:$USER:rX <dir>`). Everything after that runs as your user.
+- **rclone credentials are per-user.** Each run writes your own fresh `~/.config/rclone/rclone.conf` from the `google_drive` credentials in `config.yml` (including the OAuth tokens; a long-lived `refresh_token` is auto-refreshed on expiry). No shared `/root/.config/rclone` config is needed — and don't symlink one.
+- **pm2 runs as the user who started it.** `pm2 start ecosystem.config.cjs` uses *your* PM2 install and env.
+- **Config reload semantics:** `config.yml` is re-read on every process start. After editing it, restart with `pm2 restart backup-mgr` (or just run commands again) — no daemon reload command needed.
+- The systemd example below is the **privileged** alternative: systemd services run as root (or a then-configured user) and need the service to traverse the same directories.
+
+---
+
 ## Deployment as a systemd service (alternative to pm2)
 
 If you prefer systemd, a minimal unit:
@@ -215,6 +243,7 @@ WantedBy=multi-user.target
 - **Upload fails / auth expired** → re-run `backup-mgr remote-auth`. Check `gdrive:` resolves via `rclone lsd gdrive:`.
 - **passphrase forgotten** → there is no recovery. Keep it safe (see Encryption notes).
 - **preflight refuses to run** → free disk too small; lower `min_free_disk_gb` or resize the volume.
+- **`backup path is not a directory` / `cannot read source` as non-root** → permission problem on `backup.path`. Grant access: `sudo ./scripts/grant-access.sh $USER <backup-dir>` (see [Running without root](#running-without-root-per-user-deployment)). The target must exist and be traverseable at the moment of the run.
 - **`check` reports a hash mismatch** → the remote copy differs from the manifest; re-download/re-upload or restore from an older intact archive.
 - **Not enough disk during compression** → ensure `backup.dir` is on a volume with headroom equal to the source size.
 
@@ -223,6 +252,8 @@ WantedBy=multi-user.target
 ## Project layout
 
 ```
+scripts/
+  grant-access.sh   # one-time sudo step: setfacl read+traverse grant for non-root backups
 src/
   main.rs        # CLI + daemon orchestration + run/restore/check commands
   config.rs      # typed config, serde defaults, embedded template (config.example.yml source of truth)

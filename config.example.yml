@@ -108,7 +108,7 @@ storage:
     # CRITICAL - when enabled this is a full second copy target (e.g. B2).
     enabled: false
     remote: "b2"
-    dir: "mc-backup"
+    dir: "backup"
     retention: 3
     client_id: ""
     client_secret: ""
@@ -148,4 +148,4 @@ run:
   continue_after_manual_resume: false
   check_state_seconds: 30
 
-timezone: "UTC"
+timezone: "Asia/Kolkata"
