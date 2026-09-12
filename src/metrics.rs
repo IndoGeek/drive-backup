@@ -52,12 +52,16 @@ impl Metrics {
         *self.source_size_bytes.lock().unwrap() = estimated;
     }
 
-    pub fn serve(self: &Arc<Metrics>, host: &str, port: u16, logger: &crate::logger::Logger) {
+    pub fn serve(self: &Arc<Metrics>, host: &str, port: u16, logger: &crate::logger::Logger, verbose_bind: bool) {
         let addr = format!("{}:{}", host, port);
         let listener = match TcpListener::bind(&addr) {
             Ok(l) => l,
             Err(e) => {
-                logger.warn(&format!("metrics: cannot bind {} ({}), skipping", addr, e));
+                if verbose_bind {
+                    logger.warn(&format!("metrics: cannot bind {} ({}), skipping", addr, e));
+                } else {
+                    logger.debug(&format!("metrics: {} already bound elsewhere ({}), skipping", addr, e));
+                }
                 return;
             }
         };

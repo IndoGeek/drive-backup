@@ -15,11 +15,11 @@
 backup:
   # CRITICAL - archive file-name prefix everywhere (local + remote + retention).
   # Only change before the first run; old archives stop being pruned afterwards.
-  prefix: "mc"
+  prefix: "backup"
 
   # CRITICAL - the folder that gets archived. Everything inside is included
   # (unless excluded below).
-  path: "/var/lib/pterodactyl/volumes/<SERVER-UUID>"
+  path: "/path/to/your/data"
 
   # Local staging directory where archives are created before upload.
   dir: "./backup"
@@ -85,7 +85,7 @@ google_drive:
   # CRITICAL - PRIMARY rclone remote name (create with "backup-mgr remote-auth").
   remote: "gdrive"
   # CRITICAL - folder on Google Drive where backups are stored.
-  dir: "mc-backup"
+  dir: "my-backups"
   retention: 3
 
   # Optional OAuth client id/secret (Google Cloud OAuth client).
@@ -148,4 +148,4 @@ run:
   continue_after_manual_resume: false
   check_state_seconds: 30
 
-timezone: "Asia/Kolkata"
+timezone: "UTC"

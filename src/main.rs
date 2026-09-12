@@ -758,7 +758,7 @@ fn cmd_remote_auth(cfg: &Config, logger: &Logger) -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_status(cfg: &Config, logger: &Logger) -> Result<(), String> {
+fn cmd_status(cfg: &Config, logger: &Logger, limit: Option<usize>) -> Result<(), String> {
     let state_file = cfg.resolve(&cfg.inner.state.file);
     let st = RunState::load(&state_file);
     println!("=== backup-mgr status ===");
@@ -772,6 +772,10 @@ fn cmd_status(cfg: &Config, logger: &Logger) -> Result<(), String> {
     }
     if !st.requires_manual_resume {
         logger.info("no manual resume required");
+    }
+    if let Some(n) = limit {
+        println!();
+        print_history_rows(n)?;
     }
     Ok(())
 }
@@ -1024,6 +1028,11 @@ fn cmd_check(cfg: &Config, logger: &Logger, file: Option<&str>) -> Result<(), St
 }
 
 fn cmd_history(_cfg: &Config, limit: usize) -> Result<(), String> {
+    println!("=== backup-mgr history (last {}) ===", limit);
+    print_history_rows(limit)
+}
+
+fn print_history_rows(limit: usize) -> Result<(), String> {
     let Some(d) = db() else {
         return Err("database unavailable".into());
     };
@@ -1120,7 +1129,7 @@ fn main() {
     // metrics endpoint
     if cfg.inner.metrics.enabled {
         let m = METRICS.get_or_init(metrics::Metrics::new);
-        m.serve(&cfg.inner.metrics.host, cfg.inner.metrics.port, &logger);
+        m.serve(&cfg.inner.metrics.host, cfg.inner.metrics.port, &logger, cmd == "daemon");
     }
 
     // sqlite history
@@ -1189,7 +1198,10 @@ fn main() {
             cmd_history(&cfg, n)
         }
         "remote-auth" => cmd_remote_auth(&cfg, &logger),
-        "status" => cmd_status(&cfg, &logger).map(|_| ()),
+        "status" => {
+            let n = rest.iter().find(|a| !a.starts_with('-')).and_then(|a| a.parse::<usize>().ok());
+            cmd_status(&cfg, &logger, n)
+        }
         "reset" => cmd_reset(&cfg),
         _ => Err(format!(
             "unknown command '{}'. Usage:\n  backup-mgr [daemon]\n  backup-mgr run [--world] [--no-upload|--keep-local|--no-ptero|--dry-run|--force]\n  backup-mgr test-compress\n  backup-mgr restore [<file> [target-dir]]\n  backup-mgr check [file]\n  backup-mgr history [N]\n  backup-mgr remote-auth\n  backup-mgr status\n  backup-mgr reset\n  [--config <path>]",
