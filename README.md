@@ -68,12 +68,18 @@ backup-mgr remote-auth --config config.yml
 backup-mgr check --config config.yml          # verifies remote + local integrity
 backup-mgr status --config config.yml         # shows current/last/history state
 
-# 7. first backup (upload /tmp testing or for real):
+# 7. (non-root, recommended) grant access to the directory you want to back up so
+#    you can run backup-mgr without sudo. The ONLY extra sudo step.
+sudo ./scripts/grant-access.sh $USER /var/lib/pterodactyl/volumes/<server-uuid>/
+#    installs the 'acl' package if needed, then grants read+traverse access.
+#    Skip this step only if you already have permission on that directory.
+
+# 8. first backup (upload /tmp testing or for real):
 backup-mgr run --config config.yml            # manual single run
 # or a purely local archive (no upload) to test compression:
 backup-mgr test-compress --config config.yml
 
-# 8. run as a service
+# 9. run as a service
 pm2 start ecosystem.config.cjs                # daemon: runs scheduled backups
 pm2 save                                      # persist across reboots
 ```
