@@ -50,6 +50,7 @@ version = "1.0.0"
 dependencies = [
  "chrono",
  "chrono-tz",
+ "http",
  "libc",
  "rusqlite",
  "serde",

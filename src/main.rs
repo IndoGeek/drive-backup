@@ -329,21 +329,26 @@ fn run_backup(
         backup::human_size(free)
     ));
 
-    // ---------- pterodactyl save-all ----------
+    // ---------- pterodactyl pre-backup (save + optional graceful shutdown) ----------
+    // `server_guard` restarts the server on Drop, so it comes back up on every
+    // possible exit path (success, failure, early return) automatically.
+    let mut server_guard: Option<ptero::PteroGuard<'_>> = None;
     if opts.ptero {
-        if !opts.dry_run {
+        if opts.dry_run {
+            logger.info("dry-run: skipping pterodactyl pre-backup (server untouched)");
+        } else {
             st.stage = "pterodactyl-save".into();
             st.save(state_file)?;
-        }
-        match ptero::pre_backup_save(cfg, logger) {
-            Ok(_) => {}
-            Err(e) => {
-                if cfg.inner.pterodactyl.fail_on_error {
-                    db_record(stage_label, &base_name, None, None, "-", "failed", &e);
-                    metrics_run(false, 0, start_inst.elapsed(), &base_name);
-                    return fail(cfg, state_file, &mut st, logger, "pterodactyl-save", &e);
+            match ptero::pre_backup(cfg, logger, &mut server_guard) {
+                Ok(()) => {}
+                Err(e) => {
+                    if e.critical || cfg.inner.pterodactyl.fail_on_error {
+                        db_record(stage_label, &base_name, None, None, "-", "failed", &e.message);
+                        metrics_run(false, 0, start_inst.elapsed(), &base_name);
+                        return fail(cfg, state_file, &mut st, logger, "pterodactyl-save", &e.message);
+                    }
+                    logger.warn(&format!("pterodactyl pre-backup failed (continuing): {}", e.message));
                 }
-                logger.warn(&format!("pterodactyl pre-backup failed (continuing): {e}"));
             }
         }
     }
@@ -531,6 +536,11 @@ fn run_backup(
         }
     }
     backup::prune_local(&local_dir, prune_ext, b.max_local_backups, logger);
+
+    // ---------- restart server (if it was stopped for this backup) ----------
+    if let Some(g) = server_guard.as_mut() {
+        g.restart_now();
+    }
 
     // ---------- finalize ----------
     let duration = start_inst.elapsed();

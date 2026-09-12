@@ -193,6 +193,16 @@ pub struct PteroCfg {
     pub pre_backup_command: String,
     pub pre_backup_delay_seconds: u64,
     pub fail_on_error: bool,
+    #[serde(default)]
+    pub shutdown_server: bool,
+    #[serde(default = "default_shutdown_signal")]
+    pub shutdown_signal: String,
+    #[serde(default = "default_stop_timeout_secs")]
+    pub stop_timeout_seconds: u64,
+    #[serde(default = "default_true")]
+    pub start_server_after: bool,
+    #[serde(default = "default_start_timeout_secs")]
+    pub start_timeout_seconds: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -247,6 +257,15 @@ fn default_world_prefix() -> String {
 }
 fn default_cipher() -> String {
     "AES256".to_string()
+}
+fn default_shutdown_signal() -> String {
+    "stop".to_string()
+}
+fn default_stop_timeout_secs() -> u64 {
+    180
+}
+fn default_start_timeout_secs() -> u64 {
+    90
 }
 fn default_metrics_host() -> String {
     "127.0.0.1".to_string()
@@ -471,15 +490,50 @@ database:
   file: "./history.db"
 
 pterodactyl:
-  # Before compressing a live server, send a console command (e.g. "save-all")
-  # through the Pterodactyl CLIENT API websocket to flush data to disk.
+  # ------------------------------------------------------------------
+  # Pterodactyl server control during backups. Requires a CLIENT API key
+  # (Account -> API Credentials on the panel) pasted into api_key below.
+  #
+  # WHAT 'save-all' DOES (Minecraft):
+  #   The game keeps chunks in RAM and writes them to disk lazily.
+  #   'save-all' forces it to flush every chunk to disk immediately, so an
+  #   archive taken right after contains the exact current world. It does
+  #   NOT stop the server.
+  #
+  # ORDER OF STAGES when enabled:
+  #   1. send pre_backup_command (e.g. "save-all") via the console websocket
+  #   2. wait pre_backup_delay_seconds while the flush finishes writing
+  #   3. if shutdown_server: true -> send the power signal shutdown_signal
+  #      and wait until the panel reports the server fully OFFLINE
+  #   4. THEN archiving starts, with the server completely stopped, so every
+  #      file is readable and nothing is mid-write (no corruption/skips)
+  #   5. when the backup is done (success OR failure), the server is started
+  #      again automatically if start_server_after: true
+  #
+  # pre_backup_delay_seconds is the pause AFTER the save command is sent and
+  # BEFORE stop/archive — NOT "time after compression starts".
   enabled: false
   panel_url: "https://panel.example.com"
-  api_key: ""                   # Paste a Pterodactyl CLIENT API key here.
-  server_id: ""                 # Server UUID shown in the panel URL.
+  api_key: ""                   # CRITICAL - paste a Pterodactyl CLIENT API key here
+  server_id: ""                 # server UUID shown in the panel URL
   pre_backup_command: "save-all"
   pre_backup_delay_seconds: 10
-  fail_on_error: false          # false = log warning and still archive anyway
+
+  # Stop the server completely before archiving (recommended for a fully
+  # consistent backup). shutdown_signal: "stop" = graceful shutdown (server
+  # saves and exits cleanly, safest) | "kill" = force-kill (data-loss risk).
+  shutdown_server: false
+  shutdown_signal: "stop"
+  stop_timeout_seconds: 180     # max wait for the server to go offline
+
+  # Start the server again once the backup finishes. start_timeout_seconds
+  # is the max time we wait for it to report "running".
+  start_server_after: true
+  start_timeout_seconds: 90
+
+  # false = problems log a warning and the archive still happens;
+  # true  = abort the run (server is restarted before aborting if it was stopped).
+  fail_on_error: false
 
 run:
   # true  -> log warning and keep taking scheduled backups after a failure

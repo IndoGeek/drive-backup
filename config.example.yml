@@ -1,111 +1,99 @@
 # =============================================================================
 # backup-mgr configuration  (EXAMPLE - copy to config.yml and edit)
-#
 #   cp config.example.yml config.yml && nano config.yml
-#
-# !!! CRITICAL OPTIONS !!! Options marked with "CRITICAL" can break backups /
-# recovery if changed carelessly. Read the inline warnings before touching them.
-# All other options are safe to tune at any time.
-#
-# After editing config.yml, restart the process to load the new settings:
-#   pm2 restart backup-mgr        (systemd: systemctl restart backup-mgr)
-# Relative paths are resolved against this file's directory.
+# =============================================================================
+#  * "CRITICAL" options can break backups / recovery if changed carelessly.
+#  * After editing config.yml, restart:  pm2 restart backup-mgr
+#  * Relative paths resolve against the config file's directory.
 # =============================================================================
 
+# =============================================================================
+#  1. GENERAL
+# =============================================================================
+timezone: "UTC"
+
+run:
+  # true  -> keep taking scheduled backups after a failure
+  # false -> pause until "backup-mgr reset" is run
+  continue_after_manual_resume: false
+  check_state_seconds: 30
+
+# =============================================================================
+#  2. BACKUP
+# =============================================================================
 backup:
-  # CRITICAL - archive file-name prefix everywhere (local + remote + retention).
-  # Only change before the first run; old archives stop being pruned afterwards.
+  # CRITICAL - archive name prefix (local + remote + retention). Change only
+  # before the first run; old archives with a different prefix are never pruned.
   prefix: "backup"
 
-  # CRITICAL - the folder that gets archived. Everything inside is included
-  # (unless excluded below).
+  # CRITICAL - the folder to archive.
   path: "/path/to/your/data"
 
-  # Local staging directory where archives are created before upload.
+  # Local staging dir where archives are created before upload.
   dir: "./backup"
 
-  # Compression. Empty defaults to "tar.gz".
-  # Supported: tar | tar.gz | tar.zst | tar.xz | tar.bz2 | zip
+  # Compression. Empty = "tar.gz". Supported: tar | tar.gz | tar.zst | tar.xz | tar.bz2 | zip
   compression: "tar.gz"
 
-  # Time of the first daily backup (24h, HH:MM) in the configured timezone.
+  # First daily backup (24h HH:MM) + runs per day (1 = once/day, N = N even runs).
   time: "03:30"
-
-  # How many backups to run per day. 1 = once/day. N = N evenly spaced runs/day.
   backups_per_day: 1
 
-  # CRITICAL - timestamp tokens used in archive names. Changing this breaks
-  # retention pruning of old archives.
+  # CRITICAL - timestamp tokens in archive names. Changing this breaks retention pruning.
   timestamp_format: "%d-%m-%y_%H-%M"
 
-  # Keep at most this many archives in the local staging dir before upload/prune.
+  # Max archives kept in the local staging dir before upload/prune.
   max_local_backups: 1
 
-  # CRITICAL - glob patterns excluded from the archive (tar --exclude semantics).
+  # CRITICAL - glob patterns excluded from the archive (tar --exclude, relative to backup root).
   exclude_patterns:
     - "*.zip"
 
-  # Run on startup if a scheduled slot was missed within this window.
+  # If a scheduled slot was missed while down, run on startup (within window).
   catch_up_on_start: true
   catch_up_window_minutes: 120
 
-  # ---- Disk-space preflight ----
+  # Disk-space preflight: require free disk >= estimated_size * slack + min_free_disk_gb.
   min_free_disk_gb: 5
   preflight_slack_factor: 1.1
 
-# ---- World-only backups (MINECRAFT SERVER ONLY) ----
+# World-only snapshots (Minecraft only): frequent small backups of just the world.
 world_backup:
-  enabled: false                # enable for minecraft servers
+  enabled: false
   minecraft_only: true
-  world_folder: "world"         # sub-folder inside backup.path
+  world_folder: "world"         # sub-folder of backup.path
   prefix: "mcworld"
-  times:                        # empty list = disabled; HH:MM run times
+  times:                        # empty = disabled; HH:MM run times
     - "06:00"
     - "12:00"
     - "18:00"
 
-# ---- Encrypted archives (gpg -c, symmetric AES256) ----
-encrypt:
-  enabled: false
-  # CRITICAL - if enabled, this MUST be set and kept safe. Lose/change it and
-  # existing encrypted archives can never be decrypted again. Stored in plain
-  # text inside this (root-only) file, never copied to remote remotes.
-  passphrase: ""
-  cipher: "AES256"
-
-logging:
-  dir: "./logs"
-  level: "info"                 # debug | info | warn | error
-  keep_days: 30
-
-state:
-  file: "./state.json"          # CRITICAL - run-state / failure flag tracking
-
-google_drive:
-  # CRITICAL - PRIMARY rclone remote name (create with "backup-mgr remote-auth").
+# =============================================================================
+#  3. STORAGE (remote destinations)
+# =============================================================================
+google_drive:                   # PRIMARY remote
+  # CRITICAL - rclone remote name (create with "backup-mgr remote-auth").
   remote: "gdrive"
-  # CRITICAL - folder on Google Drive where backups are stored.
+  # CRITICAL - destination folder on Google Drive.
   dir: "my-backups"
-  retention: 2
+  retention: 2                  # backups kept on the primary remote
 
-  # Optional OAuth client id/secret (Google Cloud OAuth client).
+  # Optional OAuth client id/secret (Google Cloud). Blank = browser auth.
   client_id: ""
   client_secret: ""
   scope: "drive"
   token_uri: "https://oauth2.googleapis.com/token"
 
-  # Optional pre-issued tokens.
+  # Pre-issued tokens (rclone refreshes automatically on expiry).
   refresh_token: ""
   access_token: ""
   expiry: ""
 
 storage:
-  # false -> primary only; if it fails, fall back to secondary. (Swap the two
-  #          sections to "or vice versa".)
-  # true  -> upload to EVERY enabled remote; any failure aborts.
+  # false -> try primary; on failure fall back to secondary
+  # true  -> upload to EVERY enabled remote; any failure aborts the run
   upload_to_all: false
-  secondary:
-    # CRITICAL - when enabled this is a full second copy target (e.g. B2).
+  secondary:                    # optional second copy target (e.g. B2)
     enabled: false
     remote: "b2"
     dir: "backup"
@@ -116,36 +104,72 @@ storage:
     access_token: ""
     expiry: ""
 
+# =============================================================================
+#  4. ENCRYPTION
+# =============================================================================
+encrypt:                        # gpg -c, symmetric AES256
+  enabled: false
+  # CRITICAL - if enabled, keep this safe. Lose/change it and existing
+  # archives can never be decrypted. Stored plaintext here, never on remotes.
+  passphrase: ""
+  cipher: "AES256"
+
+# =============================================================================
+#  5. NOTIFICATIONS
+# =============================================================================
 notifications:
-  # Discord webhook URL. Empty = disabled. When set, embedded messages are sent
-  # for backup success/failure, restore done, preflight fail, manual-resume and
-  # integrity checks.
+  # Discord webhook URL. Empty = disabled. Sent for backup success/failure,
+  # restore done, preflight fail, manual-resume and integrity checks.
   discord_webhook: ""
 
+# =============================================================================
+#  6. MONITORING
+# =============================================================================
 metrics:
-  # Prometheus-style metrics on a localhost HTTP endpoint.
-  # Try: curl http://127.0.0.1:9101/metrics
+  # Prometheus-style metrics endpoint. Try: curl http://127.0.0.1:9101/metrics
   enabled: true
   host: "127.0.0.1"
   port: 9101
 
+# =============================================================================
+#  7. INTERNAL DATA (logging / state / history)
+# =============================================================================
+logging:
+  dir: "./logs"
+  level: "info"                 # debug | info | warn | error
+  keep_days: 30
+
+state:
+  # CRITICAL - JSON tracking last run / failure status.
+  file: "./state.json"
+
 database:
   # CRITICAL - SQLite history + remote hash manifest (used by "backup-mgr check").
+  # Changing the path orphans the old history.
   file: "./history.db"
 
+# =============================================================================
+#  8. PTERODACTYL INTEGRATION  ⚠️ DEV — DO NOT ENABLE
+# =============================================================================
+# The save-all / stop / start websocket flow is NOT working yet. Leave
+# enabled: false; backups then run normally without touching the server.
 pterodactyl:
-  # Before compressing a live server, send a console command (e.g. "save-all")
-  # through the Pterodactyl CLIENT API websocket to flush data to disk.
-  enabled: false
+  enabled: false                 # ⚠️ leave false until the ptero flow is fixed
   panel_url: "https://panel.example.com"
-  api_key: ""                   # CRITICAL - Pterodactyl CLIENT API key
-  server_id: ""                 # server UUID shown in the panel URL
-  pre_backup_command: "save-all"
-  pre_backup_delay_seconds: 10
+  api_key: ""                    # CLIENT API key ("ptlc_", NOT "ptla_")
+  server_id: ""                  # server UUID shown in the panel URL
+  pre_backup_command: "save-all" # console command to flush world to disk
+  pre_backup_delay_seconds: 10   # pause after command, before stopping
+
+  # Stop the server before archiving. "stop" = graceful (safest) | "kill" = force.
+  shutdown_server: false
+  shutdown_signal: "stop"
+  stop_timeout_seconds: 180      # max wait for server to go offline
+
+  # Restart the server after the backup finishes.
+  start_server_after: true
+  start_timeout_seconds: 90      # max wait for server to report "running"
+
+  # false = warn and continue (archive still happens);
+  # true  = abort the run on any failure.
   fail_on_error: false
-
-run:
-  continue_after_manual_resume: false
-  check_state_seconds: 30
-
-timezone: "UTC"

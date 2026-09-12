@@ -17,5 +17,6 @@ chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.9"
 ureq = { version = "2", features = ["json"] }
 tungstenite = { version = "0.21", features = ["rustls-tls-native-roots"] }
+http = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 libc = "0.2"
