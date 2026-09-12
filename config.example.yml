@@ -86,12 +86,12 @@ google_drive:
   remote: "gdrive"
   # CRITICAL - folder on Google Drive where backups are stored.
   dir: "my-backups"
-  retention: 3
+  retention: 2
 
   # Optional OAuth client id/secret (Google Cloud OAuth client).
   client_id: ""
   client_secret: ""
-  scope: "https://www.googleapis.com/auth/drive"
+  scope: "drive"
   token_uri: "https://oauth2.googleapis.com/token"
 
   # Optional pre-issued tokens.
