@@ -1,17 +1,25 @@
 import { NextResponse } from 'next/server';
-import { mutateConfig, readConfig } from '@/lib/config';
+import { mutateInstanceConfig, readInstanceConfig } from '@/lib/config';
 import { coerce, CONFIG_KEYS, FIELD_BY_KEY } from '@/lib/schema';
-import { configPath } from '@/lib/env';
 import { guard } from '@/lib/auth';
+import { instanceView, pickInstance, pickInstanceForMutation, requireProvisioned } from '@/lib/routeutil';
 
 export const runtime = 'nodejs';
 
 export async function GET(req: Request) {
   const g = guard(req, 'config.view');
   if (!g.ok) return g.response;
+
+  const picked = pickInstance(req, g.user);
+  if (!picked.ok) return picked.response;
+  const inst = picked.inst;
+
+  const notReady = await requireProvisioned(inst);
+  if (notReady) return notReady;
+
   try {
-    const cfg = await readConfig();
-    return NextResponse.json({ config: cfg, path: configPath() });
+    const cfg = await readInstanceConfig(inst);
+    return NextResponse.json({ config: cfg, path: inst.configPath, instance: instanceView(inst) });
   } catch (e) {
     return NextResponse.json(
       { error: e instanceof Error ? e.message : 'cannot read config.yml' },
@@ -34,6 +42,13 @@ export async function PUT(req: Request) {
     return NextResponse.json({ error: 'invalid body' }, { status: 400 });
   }
 
+  const picked = await pickInstanceForMutation(req, g.user, body);
+  if (!picked.ok) return picked.response;
+  const inst = picked.inst;
+
+  const notReady = await requireProvisioned(inst);
+  if (notReady) return notReady;
+
   const updates: [string, unknown][] = [];
   for (const [key, value] of Object.entries(body.values)) {
     const field = FIELD_BY_KEY.get(key);
@@ -46,7 +61,9 @@ export async function PUT(req: Request) {
   }
 
   try {
-    await mutateConfig((doc) => {
+    // Written as the owning user, atomically, mode 0600 — the panel itself has no
+    // write access to another user's config.yml.
+    await mutateInstanceConfig(inst, (doc) => {
       for (const [key, value] of updates) doc.setIn(key.split('.'), value);
     });
   } catch (e) {

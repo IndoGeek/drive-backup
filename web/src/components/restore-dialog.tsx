@@ -78,7 +78,10 @@ export function RestoreDialog({ open, onClose }: { open: boolean; onClose: () =>
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
       onClick={onClose}
     >
-      <Card className="w-full max-w-2xl" onClick={(e) => e.stopPropagation()}>
+      <Card
+        className="max-h-[90vh] w-full max-w-2xl overflow-y-auto"
+        onClick={(e) => e.stopPropagation()}
+      >
         <CardHeader>
           <div className="flex items-start justify-between">
             <div>

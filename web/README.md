@@ -1,8 +1,8 @@
 # backup-mgr web panel
 
 A Next.js control panel for [`backup-mgr`](../README.md). It shells out to the `backup-mgr` binary
-for actions, and reads/writes `config.yml`, `history.db`, the log directory, the pm2 process and its
-own user database directly.
+for actions, and drives one **instance** per Linux user: that user's `config.yml`, `history.db`, logs,
+rclone config and pm2 daemon — always running commands *as that user*.
 
 It runs on a headless VPS and is meant to be reached over the network (`http://<vps-ip>:3001`, or via
 the nginx config in [`../deploy/`](../deploy/nginx-backup-mgr.conf)) — not just from localhost.
@@ -13,9 +13,13 @@ the nginx config in [`../deploy/`](../deploy/nginx-backup-mgr.conf)) — not jus
 cd web
 npm install
 npm run build
+npm start                                    # http://127.0.0.1:3001
+```
 
-# optional: initial admin password (defaults to "admin")
-BACKUP_MGR_PASSWORD=change-me npm start     # http://127.0.0.1:3001
+On a fresh server, give the panel the privileges it needs once (see [Multiple users](#multiple-users)):
+
+```bash
+sudo install -m 0440 ../deploy/sudoers-backup-mgr /etc/sudoers.d/backup-mgr && sudo visudo -c
 ```
 
 Or as a service — run this from the **repo root**, not `web/`:
@@ -33,10 +37,11 @@ pm2 start ecosystem.frontend.config.cjs && pm2 save   # app name: backup-mgr-web
 The panel binds `0.0.0.0:3001` by default; set `BACKUP_MGR_WEB_HOST=127.0.0.1` to serve it only to
 nginx.
 
-Then open the panel and sign in. **First login is `admin` / `admin`** (or whatever you set as
-`BACKUP_MGR_PASSWORD`). On that default the panel **forces a password change**: you are sent to
-**Users → Account** and every other page and API stays refused until you set a new one. See
-[Forced password change](#forced-password-change).
+Then open the panel and sign in with your **Linux** username and password — the same credentials you
+`ssh` with. There is nothing to bootstrap and no panel password to change: every human account on the
+server is already a panel user, and privileges come from the OS too: any account that may run `sudo`
+is an administrator, and root always is. There is no default login and no admin account to create —
+`sudo usermod -aG sudo alice` is how you promote someone, and it takes effect within seconds.
 
 ## Pages (no option appears on two pages)
 
@@ -46,13 +51,91 @@ Then open the panel and sign in. **First login is `admin` / `admin`** (or whatev
 | **Config** (`/config`) | Every *non-schedule* `config.yml` value, grouped by section. Edits preserve comments and are written atomically with `0600` permissions. |
 | **Auth** (`/auth`) | Authorize the **primary** remote or the **secondary** (redundancy) remote. Drive remotes support **both** rclone methods — plain browser auth (just your Google account) or your own client ID/secret; non-Drive remotes (e.g. **Backblaze B2**) are configured with account + key. On a headless VPS use the **paste token** method. Drive tokens are written to `google_drive` / `storage.secondary` in `config.yml`; B2 credentials are stored by rclone itself. |
 | **Logs** (`/logs`) | **One tab per kind of log**, each with its own file list, **live tail** (Server-Sent Events) and download: **Backup** (per-day run logs from `logging.dir`), **Daemon (pm2)** (`logs/pm2.log`, `logs/pm2-error.log`) and **Panel (pm2)** (`web/logs/pm2-web*.log`). The newest file in a tab is selected automatically, and error logs are badged. |
-| **Users** (`/users`) | Admins: create users, set roles and per-permission access, delete users. Everyone: change their **own username and password**. |
+| **Users** (`/users`) | Every account on the server, mirrored from Linux. Admins: role (from sudo), per-permission access, block/unblock, provision an instance, re-sync, prune records of deleted accounts, and their own elevation state with an **End elevation** button. Everyone: their own instance details, their sudo status, and a pointer to `passwd`. |
 
-## Users and permissions
+## Multiple users
 
-Accounts live in `data/users.db` (SQLite, scrypt-hashed passwords, `0700` directory). A default
-**admin** account is bootstrapped on the first request. Admins implicitly hold every permission; other
-users get exactly the permissions ticked for them, enforced **server-side on each API route**.
+Identity **is** the Linux account, so the panel stores **authorization only** — it holds no password
+hashes at all (`data/users.db`, `0700` directory). Sign-in verifies your password against
+`/etc/shadow` using the host's own `crypt(3)` (via `perl`, or `python3` as a fallback), so
+`sudo passwd -l alice` locks the panel too, and there is no second credential to leak or forget.
+
+**Adding a user is `sudo adduser alice`, and that is the whole procedure.** The mirror of the account
+database is kept current by [`src/lib/userwatch.ts`](src/lib/userwatch.ts), started from
+`src/instrumentation.ts`:
+
+| When | What happens |
+|---|---|
+| At server start | One reconcile, so the panel is correct the moment it comes up |
+| Every `BACKUP_MGR_AUTO_SYNC_INTERVAL_MS` (default 15s) | Poll as a backstop |
+| Whenever the passwd file changes | `fs.watchFile` catches `useradd`/`userdel` within seconds |
+| On first sign-in | `ensureUser()` records the account even with auto-sync off |
+
+Nothing is ever deleted by a sync. An account that disappears is flagged **`account gone`** (and loses
+access on its next request, because `currentUser()` rejects orphaned records), its permissions are
+kept, and an admin prunes the record when they are sure — so re-creating an account restores access
+with the same grants. Because a deleted record would be a lockout, reconciliation *refuses to act*
+when the account database can't be read: an unreadable `/etc/passwd` is reported as a failure, never
+as "every account was deleted".
+
+**One instance per user.** Each user's instance defaults to `~/backup-mgr` and holds their own
+`config.yml`, `logs/`, `backup/`, `history.db`, `state.json`, rclone config and pm2 daemon
+(`PM2_HOME`, so their `pm2 restart` cannot touch anyone else's app). Every command runs through
+`sudo -u <user> -H env …`, and `config.yml` is `0600` owned by that user — which is the isolation:
+the panel never reads an instance's files as itself. `data/instances.yml` can move a user's instance
+elsewhere, which is how an existing single-user deployment keeps its checkout:
+
+```yaml
+# web/data/instances.yml
+alice:
+  root: /opt/drive-backup      # keep using the existing checkout
+  pm2_name: backup-mgr
+```
+
+**Provisioning** (directory, seeded `config.yml`, pm2 ecosystem file) is the `Provision` button, or
+`Provision all missing` for several accounts at once. It never overwrites an existing `config.yml`,
+which holds that user's passphrase and tokens. Set `BACKUP_MGR_AUTO_PROVISION=1` to have the watcher
+do it for every new account. Until an instance exists, routes answer `409 needs_provisioning` rather
+than failing obscurely.
+
+### Who is an admin: sudo decides
+
+The panel has no admin flag. It asks sudo itself (`sudo -l -U <user>`, so sudoers.d and per-command
+rules are seen; `sudo`/`admin`/`wheel` groups are only a fallback when sudo cannot be queried), and an
+account that may run sudo is an administrator holding every permission. Root always is. Promotion and
+demotion therefore happen on the server — `sudo usermod -aG sudo alice` — and take effect within
+seconds, with nothing to keep in sync. When sudo cannot be asked at all the panel **fails closed**
+(nobody gains admin) and keeps whatever was already recorded, so a failed probe cannot lock everyone
+out of user management.
+
+### Privileged work runs under that user's own sudo
+
+Work that changes something which is not yours is authorized by *your* sudo, not by the panel's:
+
+| Action | Elevation |
+|---|---|
+| Managing users (permissions, blocking, provisioning, pruning) | required (`users.manage`) |
+| Rebuild & reinstall the shared binary | required (`binary.install`) |
+| Any change inside another user's instance | required (admin targeting) |
+| Your own instance: config, schedule, backups, checks, restores, daemon | not required |
+| Reads, including another user's instance for an admin | not required |
+
+`authorizePrivileged()` returns `403` when the account has no sudo, and `428 { sudo_required: true,
+action }` when a password is needed. The client wrapper (`src/lib/sudo-client.tsx`) catches the 428,
+shows one dialog, `POST`s `/api/sudo`, and retries the request once — so a NOPASSWD host never sees the
+dialog at all, because the route never answers 428 there.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/sudo` | Your own elevation state: has sudo, is a password needed, elevated until |
+| `POST /api/sudo` | Verify the sudo password once (against your real Linux hash, throttled separately from sign-in) and open a grant for this login |
+| `DELETE /api/sudo` | End it now, the equivalent of `sudo -k` |
+
+The grant lives in the process's memory keyed by a hash of the session cookie, lasts
+`BACKUP_MGR_SUDO_TIMEOUT_MS` (default 15 min, sudo's default), is dropped on sign-out and after any
+rejected attempt, and is never written to disk or logged. Setting the timeout to `0` disables the
+cache. Admins implicitly hold every permission; other users get exactly the permissions ticked for
+them, enforced **server-side on each API route**.
 
 | Permission | Grants |
 |---|---|
@@ -67,38 +150,32 @@ users get exactly the permissions ticked for them, enforced **server-side on eac
 | `logs.view` | View logs |
 | `daemon.control` | Start / stop / restart the daemon |
 | `binary.install` | Rebuild and reinstall the `backup-mgr` binary |
-| `users.manage` | Manage users (admin only) |
+| `users.manage` | Manage users: permissions, admins, blocking, provisioning |
 
-Sessions are signed HttpOnly cookies, valid for 7 days, and flagged `Secure` automatically when the
+`binary.install` and `users.manage` are the only **panel-wide** (privileged) permissions, and each also
+requires the holder's own sudo — grant them as you would sudo. The rest are **instance**-scoped: they act on the holder's own instance and cannot
+reach anyone else's. Admins may additionally name another user on any instance route (`?user=alice`).
+
+Sessions are signed HttpOnly cookies, valid for 12 hours, and flagged `Secure` automatically when the
 request arrives over HTTPS (`X-Forwarded-Proto`). Navigation links are hidden when a user lacks the
 permission, but hiding is cosmetic — the API is what enforces it.
 
-### Forced password change
+### Sudoers rule
 
-An account is **flagged** while it still holds a default or admin-assigned password. The flag is
-enforced centrally, not just in the UI:
+Because verifying a Linux password means reading `/etc/shadow`, and acting as another user means
+`sudo -u`, the panel needs passwordless sudo of its own (as the service account) — note this is
+separate from each user's own sudo rules, which is what authorizes privileged panel work.
+[`../deploy/sudoers-backup-mgr`](../deploy/sudoers-backup-mgr) documents exactly why the rule is broad
+(the execution steps are `env` and `sudo`, so a per-command allow-list would be meaningless) — read it
+before installing. It needs both lines, including `ALL=(ALL) NOPASSWD: /usr/bin/sudo`, which is what
+lets privileged work run under the acting user's own sudo. With the rule in place, sign-in failures
+are reported precisely: "Cannot read /etc/shadow: passwordless sudo is not configured" is an
+infrastructure error, not a wrong password.
 
-- `guard()` and `requireAdmin()` reject every guarded route with
-  `403 {"error":"password change required", "must_change_password":true}` while the flag is set, so the
-  prompt can't be skipped by calling the API directly. `GET /api/auth/me`, `POST /api/account` and the
-  logout route intentionally stay open (they use `currentUser`, not `guard`) so the user can comply.
-- The bootstrap `admin` account is flagged whenever the password is the default — including when
-  `BACKUP_MGR_PASSWORD=admin` is set explicitly. Supplying any *other* `BACKUP_MGR_PASSWORD` counts as a
-  deliberate choice and is not flagged.
-- New users get a **"Require a password change at first sign-in"** toggle in the create/edit form
-  (default **on**), and flagged accounts show a `must change password` badge in the user list. Changing
-  your own password clears the flag automatically.
-- The client redirect (login → `/users`) is convenience only; the API refusal is the real gate.
-
-### Password policy
-
-Applied everywhere a password is set (own account, admin creating/updating, first-run bootstrap):
-
-| Rule | Detail |
-|---|---|
-| Minimum length | **8 characters** |
-| Not the username | Rejected case-insensitively |
-| Not a common word | `admin`, `password`, `changeme`, `12345678`, `backup-mgr` |
+Failed sign-ins are throttled per account+address with an exponential lockout (state is per process, so
+it resets on restart), and every reply takes at least ~350ms so timing cannot reveal whether a username
+exists. Locked (`!`) and password-less (`*`) accounts are reported distinctly to an administrator but
+vaguely to the client.
 
 ## Binary version
 
@@ -173,19 +250,31 @@ daemon runs the installed copy) are **not** flagged, so there are no false alarm
 
 | Variable | Meaning |
 |---|---|
-| `BACKUP_MGR_PASSWORD` | Initial admin password used **only when the user DB is first created**. Defaults to `admin`. A value of `admin` still counts as the default, so the first login is forced to change it. |
+| `BACKUP_MGR_SUDO_TIMEOUT_MS` | How long an elevated session lasts before the sudo password is asked again (default `900000`, 15 min; `0` asks every time). |
+| `BACKUP_MGR_SUDO_GROUPS` | Groups treated as "has sudo" when sudo itself cannot be queried (default `sudo,admin,wheel`). |
+| `BACKUP_MGR_SUDO_FIXTURE` | JSON of canned capability answers instead of asking sudo, e.g. `{"alice":{"has_sudo":true,"passwordless":false}}`. Used by the tests. |
+| `BACKUP_MGR_ADMIN_USER` | Escape hatch for a host where sudo cannot be queried: always treat this account as an admin (it does **not** create a sudo grant for anyone). |
 | `BACKUP_MGR_SESSION_SECRET` | Secret that signs session cookies. Defaults to a random secret stored in `data/session.secret` (`0600`). |
-| `BACKUP_MGR_ROOT` | Repo root (defaults to `..` from `web/`). `config.yml`, `history.db` and `logs/` are expected there. |
-| `BACKUP_MGR_CONFIG` | Path to `config.yml` (defaults to `$BACKUP_MGR_ROOT/config.yml`). |
-| `BACKUP_MGR_BIN` | The `backup-mgr` binary (default: on `PATH`). |
-| `BACKUP_MGR_DATA_DIR` | Where `users.db` and the session secret live (default `web/data`). |
-| `BACKUP_MGR_USERS_DB` | Explicit path to `users.db`. |
-| `BACKUP_MGR_PM2_NAME` | pm2 app name controlled by the Dashboard (default `backup-mgr`). |
-| `PM2_BIN` | `pm2` executable (default: on `PATH`). |
-| `RCLONE_CONFIG` | rclone config path. Used when the panel creates remotes (e.g. B2); defaults to rclone's own per-user config. |
+| `BACKUP_MGR_MIN_UID` | Lowest uid treated as a human account (default `1000`). |
+| `BACKUP_MGR_INCLUDE_ROOT` | Mirror root as a panel user (set `0` to exclude). |
+| `BACKUP_MGR_EXCLUDE_USERS` | Comma-separated accounts never to mirror. |
+| `BACKUP_MGR_AUTO_SYNC` | Keep the mirror current automatically (default on; `0` = on demand only). |
+| `BACKUP_MGR_AUTO_SYNC_INTERVAL_MS` | Reconcile interval (default `15000`, minimum `2000`). |
+| `BACKUP_MGR_AUTO_PROVISION` | `1` = create a new account's instance for it, instead of waiting for the Provision button. |
+| `BACKUP_MGR_OSUSER_CACHE_MS` | How long a passwd read is cached (default `5000`). |
+| `BACKUP_MGR_CHECKOUT` | The served checkout — `Cargo.toml`, `target/` and `config.example.yml` live here (alias: `BACKUP_MGR_ROOT`). |
+| `BACKUP_MGR_INSTANCE_TEMPLATE` | Where each user's instance lives; `{home}` is their home directory (default `{home}/backup-mgr`). |
+| `BACKUP_MGR_INSTANCES_FILE` | YAML file mapping a username to a non-default instance location. |
+| `BACKUP_MGR_CONFIG_TEMPLATE` | Config copied into a new instance (default `<checkout>/config.example.yml`). |
+| `BACKUP_MGR_BIN` | The shared `backup-mgr` binary (default: on `PATH`). |
+| `BACKUP_MGR_DATA_DIR` | Where the panel's own state lives: `users.db`, `session.secret`, `instances.yml` (default `web/data`). |
+| `BACKUP_MGR_USERS_DB` | Explicit path to the panel's user database. |
+| `PM2_BIN` | `pm2` executable (default: on `PATH`); each instance gets its own daemon via `PM2_HOME`. |
 | `CARGO_BIN` | `cargo` executable used by the one-click **Rebuild & reinstall** button (default: `~/.cargo/bin/cargo`, then `PATH`). |
 | `BACKUP_MGR_WEB_PORT` | Port the panel binds (default `3001`). Read by `ecosystem.frontend.cjs`. |
 | `BACKUP_MGR_WEB_HOST` | Bind address (default `0.0.0.0`). Set `127.0.0.1` to expose the panel only through nginx. |
+| `BACKUP_MGR_MAX_LOGIN_FAILURES` / `BACKUP_MGR_MIN_VERIFY_MS` | Sign-in throttling: failures before a lockout (default `5`) and the reply-time floor (default `350` ms). |
+| `BACKUP_MGR_PASSWD_FILE` / `BACKUP_MGR_SHADOW_FILE` | Alternate account/password database. Normally unset — the tests use them to drive the real code paths without root. |
 
 If `pm2` isn't installed the Daemon card says so instead of failing.
 
@@ -200,7 +289,13 @@ If `pm2` isn't installed the Daemon card says so instead of failing.
 - The daemon reads `config.yml` at startup, so restart it (`pm2 restart backup-mgr`) after saving
   config or schedule changes. The UI reminds you.
 - `rclone authorize`'s callback listens on `127.0.0.1:53682` **on the server**, which a browser on a
-  different machine can't reach. Use the Auth page's **paste token** flow unless you're tunnelling.
+  different machine can't reach. Use the Auth page's **paste token** flow unless you're tunnelling
+  (`ssh -L 53682:127.0.0.1:53682 you@vps`).
+- **A pasted token must come from the same OAuth client as `config.yml`.** You can run
+  `rclone authorize` on your laptop — the token is tied to the Google account and the OAuth client,
+  not to the host or shell user. But if `google_drive.client_id`/`client_secret` (or the secondary's)
+  are set, a token minted with rclone's built-in client will authorize successfully and then fail to
+  refresh about an hour later. The Auth page reads your config and shows the exact command.
 - Saving an OAuth token writes it to `config.yml`; the next backup run syncs it into `rclone.conf`
   automatically.
 - For the live log stream through nginx you need `proxy_buffering off` — already set in
@@ -208,15 +303,17 @@ If `pm2` isn't installed the Daemon card says so instead of failing.
 
 ## Log sources
 
-The three tabs come from `logSourceDefs()` in [`src/lib/logs.ts`](src/lib/logs.ts). The Backup and
-Daemon logs **share a directory by default** (`<root>/logs`), so each source filters by *filename*
-rather than by directory alone — `pm2*.log` is routed to the Daemon tab and everything else to Backup.
+The three tabs come from `logSourceDefs()` in [`src/lib/logs.ts`](src/lib/logs.ts), resolved against
+the caller's own instance (or, for an admin, whichever user they target). The Backup and Daemon logs
+**share a directory by default**, so each source filters by *filename* rather than by directory alone —
+`pm2*.log` is routed to the Daemon tab and everything else to Backup. `<instance>` is the user's
+instance root (`~/backup-mgr` by default).
 
 | Tab | Directory | Matches |
 |---|---|---|
-| **Backup** | `logging.dir` from `config.yml` (default `<root>/logs`) | `*.log` that isn't `pm2*` |
-| **Daemon (pm2)** | `<root>/logs` | `pm2.log`, `pm2-error.log` |
-| **Panel (pm2)** | `<root>/web/logs` | `pm2-web.log`, `pm2-web-error.log` |
+| **Backup** | `logging.dir` from that instance's `config.yml` (default `<instance>/logs`) | `*.log` that isn't `pm2*` |
+| **Daemon (pm2)** | `<instance>/logs` | `pm2.log`, `pm2-error.log` |
+| **Panel (pm2)** | `web/logs` (the shared checkout) | `pm2-web.log`, `pm2-web-error.log` |
 
 `GET /api/logs` returns every source with its files in one request; `GET /api/logs?source=<id>&file=<name>`
 reads one file, and `GET /api/logs/stream?source=<id>&file=<name>` streams it. Both take the source id, so
@@ -240,8 +337,11 @@ resolve a *different* Next version from the npx cache and refuse to start agains
 ## Tests
 
 ```bash
-npm test     # vitest (69): permissions, user store + password policy, session signing,
-             # rclone parsing, build-stamp comparison, install-target / cargo
-             # discovery / daemon-staleness logic, log-source separation, and API
-             # guards (including the forced-password-change and binary-install gates)
+npm test     # vitest (175): sudo capability + elevation grants (scope, expiry,
+             # sign-out, sudo -k), privileged-route gating, account mirroring +
+             # reconciliation (a new Linux account appearing unaided), Linux password
+             # verification against real crypt(3) hashes, per-user instance resolution
+             # and the run-as-user runner, permissions, session signing, rclone
+             # parsing, build-stamp comparison, install-target / cargo discovery /
+             # daemon-staleness logic, log-source separation, and API guards
 ```

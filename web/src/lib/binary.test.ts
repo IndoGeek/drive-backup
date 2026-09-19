@@ -4,6 +4,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   compareRunningBinary,
+  installArgs,
   installCommandText,
   installTarget,
   resolveBinaryPath,
@@ -120,6 +121,25 @@ describe('compareRunningBinary', () => {
     const r = compareRunningBinary(null, disk);
     expect(r.restart_needed).toBe(false);
     expect(r.running_exe).toBeNull();
+  });
+});
+
+describe('installArgs', () => {
+  it('gives install exactly one source and one target', () => {
+    const args = installArgs('/srv/backup/target/release/backup-mgr', '/usr/local/bin/backup-mgr');
+    expect(args).toEqual([
+      '-m',
+      '0755',
+      '/srv/backup/target/release/backup-mgr',
+      '/usr/local/bin/backup-mgr',
+    ]);
+  });
+
+  it('never repeats the command name, which would make install expect a directory', () => {
+    // `sudo -n install install -m 0755 …` makes GNU install read two sources and
+    // fail with "target …: Not a directory" — the bug that made a NOPASSWD host
+    // ask for a sudo password.
+    expect(installArgs('/srv/a', '/usr/local/bin/backup-mgr')).not.toContain('install');
   });
 });
 

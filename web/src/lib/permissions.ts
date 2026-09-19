@@ -1,22 +1,50 @@
+/**
+ * Permissions are scoped, which matters in the multi-user model:
+ *
+ *  - `instance` permissions act only on the holder's *own* isolated instance —
+ *    their config.yml, their logs, their daemon. Granting all of them to every
+ *    user is safe, because no user can reach another user's files: the OS
+ *    enforces that, since every command runs as that account.
+ *  - `panel` permissions are global and privileged. `users.manage` decides who
+ *    may use the panel at all; `binary.install` runs a build and a privileged
+ *    install over the shared binary.
+ */
 export const PERMISSIONS = [
-  { key: 'dashboard.view', label: 'View dashboard, status and history' },
-  { key: 'backup.run', label: 'Run backups, dry runs and compression tests' },
-  { key: 'backup.schedule', label: 'Edit the backup schedule' },
-  { key: 'backup.check', label: 'Run integrity checks' },
-  { key: 'backup.restore', label: 'Restore backups' },
-  { key: 'backup.fix_perms', label: 'Fix file permissions' },
-  { key: 'remote.auth', label: 'Authorize storage remotes (rclone)' },
-  { key: 'config.view', label: 'View configuration' },
-  { key: 'config.edit', label: 'Edit configuration' },
-  { key: 'logs.view', label: 'View logs' },
-  { key: 'daemon.control', label: 'Start / stop / restart the daemon' },
-  { key: 'binary.install', label: 'Rebuild and reinstall the backup-mgr binary' },
-  { key: 'users.manage', label: 'Manage users (admin only)' },
+  { key: 'dashboard.view', label: 'View dashboard, status and history', scope: 'instance' },
+  { key: 'backup.run', label: 'Run backups, dry runs and compression tests', scope: 'instance' },
+  { key: 'backup.schedule', label: 'Edit the backup schedule', scope: 'instance' },
+  { key: 'backup.check', label: 'Run integrity checks', scope: 'instance' },
+  { key: 'backup.restore', label: 'Restore backups', scope: 'instance' },
+  { key: 'backup.fix_perms', label: 'Fix file permissions', scope: 'instance' },
+  { key: 'remote.auth', label: 'Authorize storage remotes (rclone)', scope: 'instance' },
+  { key: 'config.view', label: 'View configuration', scope: 'instance' },
+  { key: 'config.edit', label: 'Edit configuration', scope: 'instance' },
+  { key: 'logs.view', label: 'View logs', scope: 'instance' },
+  { key: 'daemon.control', label: 'Start / stop / restart the daemon', scope: 'instance' },
+  {
+    key: 'users.manage',
+    label: 'Manage users: permissions, admins, access',
+    scope: 'panel',
+  },
+  {
+    key: 'binary.install',
+    label: 'Rebuild and reinstall the shared backup-mgr binary',
+    scope: 'panel',
+  },
 ] as const;
 
 export type Permission = (typeof PERMISSIONS)[number]['key'];
+export type PermissionScope = (typeof PERMISSIONS)[number]['scope'];
 
 export const ALL_PERMISSIONS: Permission[] = PERMISSIONS.map((p) => p.key);
+
+/**
+ * What a newly mirrored Linux account starts with: full control of its own
+ * instance, and nothing global. An admin can restrict any of it afterwards.
+ */
+export const INSTANCE_PERMISSIONS: Permission[] = PERMISSIONS.filter(
+  (p) => p.scope === 'instance',
+).map((p) => p.key);
 
 export function isPermission(value: unknown): value is Permission {
   return typeof value === 'string' && (ALL_PERMISSIONS as string[]).includes(value);

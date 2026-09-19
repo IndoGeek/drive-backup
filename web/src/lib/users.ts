@@ -1,16 +1,44 @@
-import Database from 'better-sqlite3';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { ALL_PERMISSIONS, normalizePermissions, type Permission } from './permissions';
+import { db, dbLocation, dbPath } from './panel-db';
+import { ALL_PERMISSIONS, INSTANCE_PERMISSIONS, normalizePermissions, type Permission } from './permissions';
+import { osUserSource } from './osusers';
+import { sudoCapability, type SudoCapability } from './sudo';
+import { dataDir } from './panel';
+import { instanceFor, type Instance } from './instance';
+
+/**
+ * The panel stores *authorization* only — who may use the panel and what they may
+ * do. Authentication belongs to Linux: there are no passwords here.
+ *
+ * Records mirror /etc/passwd. A user row is created the moment an account is
+ * seen (at login, or during a sync), and disappears from view if the account is
+ * removed. The panel never creates, edits or deletes an OS account.
+ */
 
 export type User = {
   id: number;
+  /** Linux username — the identity, and the key to the user's instance. */
   username: string;
+  /**
+   * Derived from the OS: an account that may run sudo, or root. Read-only in the
+   * panel — you grant admin with `usermod -aG sudo`, not with a checkbox, so the
+   * panel can never disagree with the server about who is privileged.
+   */
   is_admin: boolean;
+  /** Whether this account may run privileged panel work (see ./sudo.ts). */
+  sudo: SudoCapability;
   permissions: Permission[];
-  /** Set while the account still uses an admin-assigned / default password. */
-  must_change_password: boolean;
+  /** Admins can block an account from the panel without touching the OS. */
+  enabled: boolean;
+  /**
+   * Derived: the Linux account no longer exists, but the row is kept so its
+   * permissions survive a temporary removal (and so admins can see what's stale).
+   */
+  orphaned: boolean;
+  /** Derived: this user's backup instance, if it can be resolved. */
+  instance: Instance | null;
   created_at: string;
   updated_at: string;
 };
@@ -18,294 +46,15 @@ export type User = {
 type UserRow = {
   id: number;
   username: string;
-  password_hash: string;
   is_admin: number;
   permissions: string;
-  must_change_password: number;
+  enabled: number;
   created_at: string;
   updated_at: string;
 };
 
-function dataDir(): string {
-  const dir = process.env.BACKUP_MGR_DATA_DIR || path.join(process.cwd(), 'data');
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  return dir;
-}
-
-function dbPath(): string {
-  return process.env.BACKUP_MGR_USERS_DB || path.join(dataDir(), 'users.db');
-}
-
-let _db: Database.Database | null = null;
-
-function db(): Database.Database {
-  if (_db) return _db;
-  const d = new Database(dbPath());
-  d.pragma('journal_mode = WAL');
-  d.exec(`
-    CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      username TEXT NOT NULL UNIQUE,
-      password_hash TEXT NOT NULL,
-      is_admin INTEGER NOT NULL DEFAULT 0,
-      permissions TEXT NOT NULL DEFAULT '[]',
-      must_change_password INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
-    );
-  `);
-  ensureColumns(d);
-  bootstrapAdmin(d);
-  // The hash is not a secret we want world-readable. The 0700 parent dir already
-  // blocks traversal, but match session.secret (0600) for defence in depth.
-  try {
-    fs.chmodSync(dbPath(), 0o600);
-  } catch {
-    // best effort (e.g. a filesystem without POSIX modes)
-  }
-  _db = d;
-  return d;
-}
-
-/** Add columns introduced after the first release (existing databases). */
-function ensureColumns(d: Database.Database): void {
-  const cols = d.prepare('PRAGMA table_info(users)').all() as { name: string }[];
-  if (!cols.some((c) => c.name === 'must_change_password')) {
-    d.exec('ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0');
-  }
-}
-
-/**
- * Create the default admin (username `admin`) on first start. When the password
- * is the well-known default, the account is flagged so the panel forces a change
- * before it will do anything else. An operator-supplied BACKUP_MGR_PASSWORD is
- * already a deliberate choice, so it does not trigger the prompt.
- */
-function bootstrapAdmin(d: Database.Database): void {
-  const { n } = d.prepare('SELECT COUNT(*) AS n FROM users').get() as { n: number };
-  if (n > 0) return;
-  const envPassword = process.env.BACKUP_MGR_PASSWORD?.trim();
-  // Treat the well-known default as "still default", however it was supplied.
-  const usingDefault = !envPassword || envPassword === 'admin';
-  const password = usingDefault ? 'admin' : envPassword!;
-  const now = new Date().toISOString();
-  d.prepare(
-    `INSERT INTO users (username, password_hash, is_admin, permissions, must_change_password, created_at, updated_at)
-     VALUES (?, ?, 1, ?, ?, ?, ?)`,
-  ).run(
-    'admin',
-    hashPassword(password),
-    JSON.stringify(ALL_PERMISSIONS),
-    usingDefault ? 1 : 0,
-    now,
-    now,
-  );
-}
-
-export function dbLocation(): string {
-  return dbPath();
-}
-
-export const MIN_PASSWORD_LENGTH = 8;
-
-const COMMON_PASSWORDS = new Set(['admin', 'password', 'changeme', '12345678', 'backup-mgr']);
-
-/**
- * Shared password policy. Returns an error message, or null when acceptable.
- * Used both when an admin assigns a password and when a user picks their own
- * (including the forced change of the default password).
- */
-export function passwordProblem(password: string, username: string): string | null {
-  const lower = password.toLowerCase();
-  // Checked before the length rule so `admin` is reported as too common rather
-  // than merely too short — a more useful message for the default password.
-  if (COMMON_PASSWORDS.has(lower)) {
-    return 'That password is too common — please pick something else';
-  }
-  if (lower === username.toLowerCase()) {
-    return 'Password must not be the same as the username';
-  }
-  if (password.length < MIN_PASSWORD_LENGTH) {
-    return `Password must be at least ${MIN_PASSWORD_LENGTH} characters`;
-  }
-  return null;
-}
-
-export function hashPassword(password: string): string {
-  const salt = crypto.randomBytes(16);
-  const hash = crypto.scryptSync(password, salt, 64);
-  return `scrypt$${salt.toString('hex')}$${hash.toString('hex')}`;
-}
-
-function verifyPassword(password: string, stored: string): boolean {
-  const parts = stored.split('$');
-  if (parts.length !== 3 || parts[0] !== 'scrypt') return false;
-  try {
-    const salt = Buffer.from(parts[1], 'hex');
-    const expected = Buffer.from(parts[2], 'hex');
-    const actual = crypto.scryptSync(password, salt, expected.length);
-    return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
-  } catch {
-    return false;
-  }
-}
-
-function toUser(row: UserRow): User {
-  return {
-    id: row.id,
-    username: row.username,
-    is_admin: row.is_admin === 1,
-    permissions: normalizePermissions(JSON.parse(row.permissions || '[]')),
-    must_change_password: row.must_change_password === 1,
-    created_at: row.created_at,
-    updated_at: row.updated_at,
-  };
-}
-
-export function listUsers(): User[] {
-  const rows = db().prepare('SELECT * FROM users ORDER BY id').all() as UserRow[];
-  return rows.map(toUser);
-}
-
-export function getUserById(id: number): User | null {
-  const row = db().prepare('SELECT * FROM users WHERE id = ?').get(id) as UserRow | undefined;
-  return row ? toUser(row) : null;
-}
-
-export function getUserByName(username: string): User | null {
-  const row = db().prepare('SELECT * FROM users WHERE username = ?').get(username) as
-    | UserRow
-    | undefined;
-  return row ? toUser(row) : null;
-}
-
-export function countAdmins(): number {
-  const { n } = db()
-    .prepare('SELECT COUNT(*) AS n FROM users WHERE is_admin = 1')
-    .get() as { n: number };
-  return n;
-}
-
-/** Verify credentials, returning the user on success. */
-export function authenticate(username: string, password: string): User | null {
-  const row = db().prepare('SELECT * FROM users WHERE username = ?').get(username) as
-    | UserRow
-    | undefined;
-  if (!row) {
-    // Still do a hash comparison to keep timing roughly constant.
-    verifyPassword(password, 'scrypt$00$00');
-    return null;
-  }
-  if (!verifyPassword(password, row.password_hash)) return null;
-  return toUser(row);
-}
-
-export type CreateUserInput = {
-  username: string;
-  password: string;
-  is_admin: boolean;
-  permissions: Permission[];
-  /** Force the new user to pick their own password at first sign-in. */
-  must_change_password?: boolean;
-};
-
-export function createUser(input: CreateUserInput): User {
-  const now = new Date().toISOString();
-  const permissions = input.is_admin ? ALL_PERMISSIONS : normalizePermissions(input.permissions);
-  const info = db()
-    .prepare(
-      `INSERT INTO users (username, password_hash, is_admin, permissions, must_change_password, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .run(
-      input.username,
-      hashPassword(input.password),
-      input.is_admin ? 1 : 0,
-      JSON.stringify(permissions),
-      input.must_change_password ? 1 : 0,
-      now,
-      now,
-    );
-  const user = getUserById(Number(info.lastInsertRowid));
-  if (!user) throw new Error('failed to create user');
-  return user;
-}
-
-export function updateUser(
-  id: number,
-  updates: {
-    is_admin?: boolean;
-    permissions?: Permission[];
-    password?: string;
-    must_change_password?: boolean;
-  },
-): User | null {
-  const existing = getUserById(id);
-  if (!existing) return null;
-  const isAdmin = updates.is_admin ?? existing.is_admin;
-  const permissions =
-    updates.permissions !== undefined
-      ? normalizePermissions(updates.permissions)
-      : existing.permissions;
-  const now = new Date().toISOString();
-  const settingPassword = !!updates.password && updates.password.length > 0;
-  // Admins can hand out a temporary password and require it be replaced.
-  const mustChange =
-    updates.must_change_password ?? (settingPassword ? false : existing.must_change_password);
-  const permsJson = JSON.stringify(isAdmin ? ALL_PERMISSIONS : permissions);
-
-  if (settingPassword) {
-    db()
-      .prepare(
-        'UPDATE users SET is_admin = ?, permissions = ?, password_hash = ?, must_change_password = ?, updated_at = ? WHERE id = ?',
-      )
-      .run(
-        isAdmin ? 1 : 0,
-        permsJson,
-        hashPassword(updates.password!),
-        mustChange ? 1 : 0,
-        now,
-        id,
-      );
-  } else {
-    db()
-      .prepare(
-        'UPDATE users SET is_admin = ?, permissions = ?, must_change_password = ?, updated_at = ? WHERE id = ?',
-      )
-      .run(isAdmin ? 1 : 0, permsJson, mustChange ? 1 : 0, now, id);
-  }
-  return getUserById(id);
-}
-
-export function updateOwnAccount(
-  id: number,
-  updates: { username?: string; password?: string },
-): User | null {
-  const existing = getUserById(id);
-  if (!existing) return null;
-  const now = new Date().toISOString();
-  if (updates.username && updates.username !== existing.username) {
-    db().prepare('UPDATE users SET username = ?, updated_at = ? WHERE id = ?').run(
-      updates.username,
-      now,
-      id,
-    );
-  }
-  if (updates.password && updates.password.length > 0) {
-    // Choosing your own password clears the forced-change flag.
-    db()
-      .prepare(
-        'UPDATE users SET password_hash = ?, must_change_password = 0, updated_at = ? WHERE id = ?',
-      )
-      .run(hashPassword(updates.password), now, id);
-  }
-  return getUserById(id);
-}
-
-export function deleteUser(id: number): boolean {
-  const info = db().prepare('DELETE FROM users WHERE id = ?').run(id);
-  return info.changes > 0;
-}
+/** The schema and the legacy migration live in ./panel-db.ts, next to the audit log. */
+export { dbLocation };
 
 /** Session signing secret: env override, else a generated file in the data dir. */
 export function sessionSecret(): string {
@@ -324,4 +73,199 @@ export function sessionSecret(): string {
     // best effort; an ephemeral secret still works for the current process
   }
   return secret;
+}
+
+/** The mirrorable accounts, plus whether the account database could be read. */
+type Accounts = { ok: boolean; names: Set<string> };
+
+function accounts(): Accounts {
+  // getOsUser() is not used here: this is a bulk check, and it is cached.
+  const src = osUserSource();
+  return { ok: src.ok, names: new Set(src.users.map((u) => u.username)) };
+}
+
+function toUser(row: UserRow, accounts: Accounts): User {
+  const sudo = sudoCapability(row.username);
+  // Admin follows the OS. Only when sudo could not be asked at all do we keep
+  // what the record already said, so a failed probe cannot demote everybody.
+  const isAdmin = sudo.source === 'unknown' ? row.is_admin === 1 : sudo.has_sudo;
+  return {
+    id: row.id,
+    username: row.username,
+    is_admin: isAdmin,
+    sudo,
+    permissions: isAdmin ? ALL_PERMISSIONS : normalizePermissions(JSON.parse(row.permissions || '[]')),
+    enabled: row.enabled === 1,
+    // Only ever orphaned when the account database was read successfully: an
+    // unreadable passwd database must not make every user look deleted.
+    orphaned: accounts.ok && !accounts.names.has(row.username),
+    instance: instanceFor(row.username),
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+/**
+ * How many accounts are administrators right now, as the OS sees it. There is no
+ * "last admin" problem to defend against any more: admin comes from sudo, and the
+ * panel cannot revoke it. Accounts whose Linux user is gone do not count — they
+ * cannot sign in.
+ */
+export function countAdmins(): number {
+  return listUsers().filter((u) => u.is_admin && !u.orphaned).length;
+}
+
+/**
+ * Insert a row for this Linux account if it is not tracked yet. Called at login so
+ * a brand-new account works immediately, without waiting for a full sync.
+ */
+export function ensureUser(username: string): User | null {
+  const d = db();
+  const existing = d.prepare('SELECT * FROM panel_users WHERE username = ?').get(username) as
+    | UserRow
+    | undefined;
+  if (!existing) {
+    const now = new Date().toISOString();
+    d.prepare(
+      `INSERT INTO panel_users (username, is_admin, permissions, enabled, created_at, updated_at)
+       VALUES (?, 0, ?, 1, ?, ?)`,
+    ).run(username, JSON.stringify(INSTANCE_PERMISSIONS), now, now);
+  }
+  const row = d.prepare('SELECT * FROM panel_users WHERE username = ?').get(username) as
+    | UserRow
+    | undefined;
+  return row ? toUser(row, accounts()) : null;
+}
+
+export type SyncResult = {
+  /** Every known record, with `orphaned` marking accounts Linux no longer has. */
+  users: User[];
+  /** Linux accounts that had no record yet — a `useradd` shows up here. */
+  added: string[];
+  /** Records whose Linux account is gone. Kept until pruned, so permissions survive. */
+  missing: string[];
+  /** False when the account database could not be read; nothing was changed. */
+  sourceOk: boolean;
+};
+
+/**
+ * Reconcile the mirror with Linux: give every mirrored account a record, and
+ * report which records have lost their account.
+ *
+ * This is the whole "add a user" story — `useradd` on the server is enough,
+ * because the account then appears here on the next reconciliation (the panel
+ * runs one automatically; see ./userwatch.ts). Nothing is ever deleted on the
+ * strength of a failed read, and nothing is deleted at all until an admin asks
+ * (see `pruneOrphans`), so a re-created account keeps its permissions.
+ */
+export function reconcileUsers(): SyncResult {
+  const d = db();
+  const src = osUserSource();
+  const known = new Set(
+    (d.prepare('SELECT username FROM panel_users').all() as { username: string }[]).map(
+      (r) => r.username,
+    ),
+  );
+  const added: string[] = [];
+  if (src.ok) {
+    const now = new Date().toISOString();
+    const insert = d.prepare(
+      `INSERT OR IGNORE INTO panel_users (username, is_admin, permissions, enabled, created_at, updated_at)
+       VALUES (?, 0, ?, 1, ?, ?)`,
+    );
+    const tx = d.transaction(() => {
+      for (const u of src.users) {
+        if (known.has(u.username)) continue;
+        insert.run(u.username, JSON.stringify(INSTANCE_PERMISSIONS), now, now);
+        added.push(u.username);
+      }
+    });
+    tx();
+  }
+  const users = listUsers();
+  return {
+    users,
+    added,
+    missing: users.filter((u) => u.orphaned).map((u) => u.username),
+    sourceOk: src.ok,
+  };
+}
+
+/** Records only — the common case, for callers that do not need the report. */
+export function syncUsers(): User[] {
+  return reconcileUsers().users;
+}
+
+export function listUsers(): User[] {
+  const rows = db().prepare('SELECT * FROM panel_users ORDER BY username').all() as UserRow[];
+  const accounts_ = accounts();
+  return rows.map((r) => toUser(r, accounts_));
+}
+
+/** DB lookup only — must stay cheap, it runs on every authenticated request. */
+export function getUserById(id: number): User | null {
+  const row = db().prepare('SELECT * FROM panel_users WHERE id = ?').get(id) as UserRow | undefined;
+  return row ? toUser(row, accounts()) : null;
+}
+
+export function getUserByName(username: string): User | null {
+  const row = db().prepare('SELECT * FROM panel_users WHERE username = ?').get(username) as
+    | UserRow
+    | undefined;
+  return row ? toUser(row, accounts()) : null;
+}
+
+export type UpdateUserInput = {
+  /** Accepted for compatibility and ignored: admin is the OS's call. */
+  is_admin?: boolean;
+  permissions?: Permission[];
+  enabled?: boolean;
+};
+
+/**
+ * Update authorization for a user. Admins hold every permission implicitly, so
+ * what is stored here only matters for accounts without sudo; `is_admin` is
+ * ignored on purpose (it is derived — see `toUser`).
+ */
+export function updateUser(id: number, updates: UpdateUserInput): User | null {
+  const existing = getUserById(id);
+  if (!existing) return null;
+  const permissions =
+    updates.permissions !== undefined
+      ? normalizePermissions(updates.permissions)
+      : existing.permissions;
+  const enabled = updates.enabled ?? existing.enabled;
+  db()
+    .prepare('UPDATE panel_users SET permissions = ?, enabled = ?, updated_at = ? WHERE id = ?')
+    .run(
+      JSON.stringify(existing.is_admin ? ALL_PERMISSIONS : permissions),
+      enabled ? 1 : 0,
+      new Date().toISOString(),
+      id,
+    );
+  return getUserById(id);
+}
+
+/**
+ * Drop records whose Linux account no longer exists.
+ *
+ * Refuses when the account database could not be read — an unreadable passwd
+ * file would otherwise look like "every account was deleted" and wipe every
+ * permission grant in one click.
+ */
+export function pruneOrphans(): { removed: string[]; sourceOk: boolean } {
+  const src = osUserSource();
+  if (!src.ok) return { removed: [], sourceOk: false };
+  const names = new Set(src.users.map((u) => u.username));
+  const rows = db().prepare('SELECT id, username FROM panel_users').all() as {
+    id: number;
+    username: string;
+  }[];
+  const orphans = rows.filter((r) => !names.has(r.username));
+  const del = db().prepare('DELETE FROM panel_users WHERE id = ?');
+  const tx = db().transaction(() => {
+    for (const o of orphans) del.run(o.id);
+  });
+  tx();
+  return { removed: orphans.map((o) => o.username), sourceOk: true };
 }

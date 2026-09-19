@@ -1,0 +1,64 @@
+# /etc/sudoers.d/backup-mgr
+#
+# Privileges the panel's service account needs.
+#
+#   sudo install -m 0440 deploy/sudoers-backup-mgr /etc/sudoers.d/backup-mgr
+#   sudo visudo -c        # always validate before relying on it
+#
+# Replace `backup-mgr` below with the Linux account that runs the panel (the
+# account that starts the pm2 `backup-mgr-web` process — `pm2 jlist` shows its
+# uid, and the panel reports it on the Users page).
+#
+# ---------------------------------------------------------------------------
+# Who is an administrator is *not* configured here
+# ---------------------------------------------------------------------------
+# The panel asks sudo itself who may run sudo (`sudo -l -U <user>`) and treats
+# those accounts as administrators. There is no panel-side admin flag to set.
+#
+# ---------------------------------------------------------------------------
+# Why this is broad, and what that means
+# ---------------------------------------------------------------------------
+# The panel runs each instance's commands *as that instance's Linux user*:
+#
+#     sudo -n -u <user> -H env HOME=... PATH=... PM2_HOME=... <command> ...
+#
+# and privileged work (managing users, reinstalling the binary, provisioning or
+# acting on someone else's instance) as that user's own sudo:
+#
+#     sudo -n -u <user> -H sudo -S -p '' <command> ...
+#     \______ panel's privilege ______/ \__ the user's own sudo rules __/
+#
+# Because the command being executed is `env` (and `sudo`) rather than something
+# specific, a per-command allow-list cannot meaningfully restrict what runs —
+# allowing `env` or `sudo` allows anything. So the panel needs what amounts to
+# broad execution as other users.
+#
+# That is inherent to "a service that acts on behalf of arbitrary local accounts".
+# The consequence to accept and design around:
+#
+#   * Treat the panel as a PRIVILEGED service. Anyone who can reach it and sign in
+#     acts with the powers below. Put it behind TLS and a firewall, and keep it
+#     patched.
+#   * Panel sign-in requires the *Linux* password, so account hygiene is the
+#     access-control boundary. `passwd -l <user>` revokes panel access too.
+#   * Privileged actions additionally require the *acting user's* sudo, so an
+#     account without sudo cannot use the panel to escalate. Keep the rule below
+#     for the panel's own account only.
+#
+# If you run a single-user deployment — the panel and the only instance share one
+# Linux account — the runner skips the user switch and only the shadow read is
+# needed.
+
+# Read /etc/shadow to verify Linux passwords at sign-in. This is the only privilege
+# the panel needs on its own behalf; everything else is to act as another user.
+backup-mgr ALL=(root) NOPASSWD: /usr/bin/getent shadow [A-Za-z0-9._-]*
+
+# Act as any local account: run instance commands as that user, and let privileged
+# panel work run under that user's own sudo rules.
+backup-mgr ALL=(ALL) NOPASSWD: /usr/bin/env
+backup-mgr ALL=(ALL) NOPASSWD: /usr/bin/sudo
+
+# A single-user install needs only the shadow read; comment the two lines above out
+# and instead allow the instance's own commands, e.g.:
+#   backup-mgr ALL=(backupuser) NOPASSWD: /usr/local/bin/backup-mgr, /usr/bin/pm2, \
+#       /usr/bin/rclone, /usr/bin/tail, /usr/bin/stat, /usr/bin/cat, /usr/bin/mkdir

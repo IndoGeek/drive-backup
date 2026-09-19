@@ -1,79 +1,180 @@
 import { NextResponse } from 'next/server';
-import { requireAdmin } from '@/lib/auth';
-import {
-  countAdmins,
-  createUser,
-  deleteUser,
-  getUserByName,
-  listUsers,
-  passwordProblem,
-  updateUser,
-} from '@/lib/users';
+import { guard } from '@/lib/auth';
+import { listUsers, pruneOrphans, updateUser, type User } from '@/lib/users';
+import { instanceFor, provision } from '@/lib/instance';
 import { normalizePermissions } from '@/lib/permissions';
+import { instanceView } from '@/lib/routeutil';
+import { syncUsersNow, userWatchState } from '@/lib/userwatch';
+import { activeGrant, authorizePrivileged, sudoStatus } from '@/lib/sudo';
+import { recordAudit } from '@/lib/audit';
+import { clientAddress } from '@/lib/session';
 
 export const runtime = 'nodejs';
 
-type CreateBody = {
-  username?: string;
-  password?: string;
-  is_admin?: boolean;
-  permissions?: unknown;
-  must_change_password?: boolean;
-};
+/**
+ * User management in the multi-user model.
+ *
+ * Users are *mirrored* from Linux, so there is nothing to create or delete here:
+ * `useradd` adds someone, `userdel` removes them, and the panel's watcher
+ * (./lib/userwatch.ts) reconciles the two automatically. What an admin controls
+ * is authorization (permissions, admin, blocked) and whether a user's instance
+ * has been created on disk.
+ */
 
+type ProvisionBody = { action: 'provision'; username?: string };
+type ProvisionAllBody = { action: 'provision_all' };
+type SyncBody = { action: 'sync' };
+type PruneBody = { action: 'prune' };
 type UpdateBody = {
   id?: number;
   is_admin?: boolean;
   permissions?: unknown;
-  password?: string;
-  must_change_password?: boolean;
+  enabled?: boolean;
 };
 
 export async function GET(req: Request) {
-  const g = requireAdmin(req);
+  const g = guard(req, 'users.manage');
   if (!g.ok) return g.response;
-  return NextResponse.json({ users: listUsers() });
+  // Reconcile first so a Linux account added a moment ago is already listed. This
+  // goes through the watcher rather than calling the store directly, so it shares
+  // one implementation — and so the reported "last synced" time is always honest.
+  await syncUsersNow('request');
+  return NextResponse.json({
+    users: viewAll(),
+    // So the page can say when the mirror last synced and on what schedule.
+    sync: userWatchState(),
+    // Whether this admin may actually change anything: admin follows sudo, and a
+    // sudo password may be needed (see lib/sudo.ts).
+    sudo: await sudoStatus(req, g.user.username),
+  });
+}
+
+/**
+ * Managing users is privileged work, so it is authorized against the caller's own
+ * sudo — NOPASSWD means no prompt, otherwise the UI asks for the password once and
+ * retries (see /api/sudo).
+ */
+async function elevation(req: Request, user: User) {
+  return authorizePrivileged(req, user, 'manage users');
+}
+
+/** Record the change that was just made, so the trail says what and by whom. */
+function audit(
+  req: Request,
+  user: User,
+  action: string,
+  detail: Record<string, unknown>,
+  outcome: 'allowed' | 'failed' = 'allowed',
+) {
+  recordAudit({
+    username: user.username,
+    action,
+    outcome,
+    via: activeGrant(req, user.username) ? 'password' : 'passwordless',
+    detail,
+    address: clientAddress(req),
+  });
 }
 
 export async function POST(req: Request) {
-  const g = requireAdmin(req);
+  const g = guard(req, 'users.manage');
   if (!g.ok) return g.response;
+  const denial = await elevation(req, g.user);
+  if (denial) return denial;
 
-  let body: CreateBody | null = null;
+  let body: (ProvisionBody | ProvisionAllBody | SyncBody | PruneBody) | null = null;
   try {
-    body = (await req.json()) as CreateBody;
+    body = (await req.json()) as ProvisionBody | ProvisionAllBody | SyncBody | PruneBody;
   } catch {
     body = null;
   }
 
-  const username = String(body?.username ?? '').trim();
-  const password = String(body?.password ?? '');
-  if (!/^[A-Za-z0-9._-]{3,32}$/.test(username)) {
-    return NextResponse.json(
-      { error: 'Username must be 3-32 chars: letters, digits, dot, underscore or dash' },
-      { status: 400 },
-    );
-  }
-  const problem = passwordProblem(password, username);
-  if (problem) return NextResponse.json({ error: problem }, { status: 400 });
-  if (getUserByName(username)) {
-    return NextResponse.json({ error: 'That username is already taken' }, { status: 409 });
+  if (body?.action === 'prune') {
+    const { removed, sourceOk } = pruneOrphans();
+    if (sourceOk) audit(req, g.user, 'prune deleted accounts', { removed });
+    if (!sourceOk) {
+      return NextResponse.json(
+        {
+          error:
+            'the account database could not be read, so nothing was pruned — refusing to treat ' +
+            'an unreadable /etc/passwd as "every account was deleted"',
+        },
+        { status: 503 },
+      );
+    }
+    return NextResponse.json({ ok: true, removed });
   }
 
-  const isAdmin = Boolean(body?.is_admin);
-  const user = createUser({
-    username,
-    password,
-    is_admin: isAdmin,
-    permissions: normalizePermissions(body?.permissions),
-    must_change_password: Boolean(body?.must_change_password),
-  });
-  return NextResponse.json({ ok: true, user });
+  if (body?.action === 'sync') {
+    const report = await syncUsersNow('request');
+    return NextResponse.json({ ok: true, report, sync: userWatchState(), users: viewAll() });
+  }
+
+  if (body?.action === 'provision_all') {
+    // One click for a fresh install: give every mirrored account that does not
+    // have one yet its own directories and seeded config.yml.
+    const done: string[] = [];
+    const kept: string[] = [];
+    const failed: { username: string; error: string }[] = [];
+    for (const u of listUsers()) {
+      if (u.orphaned) continue;
+      const inst = instanceFor(u.username);
+      if (!inst) continue;
+      const result = await provision(inst);
+      if (!result.ok) {
+        failed.push({ username: u.username, error: result.error ?? 'unknown error' });
+      } else if (result.created.length) {
+        done.push(u.username);
+      } else {
+        kept.push(u.username);
+      }
+    }
+    audit(req, g.user, 'provision all instances', {
+      created: done,
+      kept,
+      failed: failed.map((f) => f.username),
+    }, failed.length ? 'failed' : 'allowed');
+    return NextResponse.json({ ok: failed.length === 0, created: done, kept, failed });
+  }
+
+  if (body?.action === 'provision') {
+    const username = String((body as ProvisionBody).username ?? '').trim();
+    const inst = instanceFor(username);
+    if (!inst) {
+      return NextResponse.json({ error: `no such mirrored account: ${username}` }, { status: 404 });
+    }
+    // Creates the directory tree, seeds config.yml from the template and writes an
+    // ecosystem file — all as that user, in their own home. Never overwrites an
+    // existing config.yml, which holds their passphrase and tokens.
+    const result = await provision(inst);
+    audit(
+      req,
+      g.user,
+      'provision instance',
+      { username, created: result.created, kept: result.keptExisting, error: result.error ?? null },
+      result.ok ? 'allowed' : 'failed',
+    );
+    return NextResponse.json(
+      { ...result, username, instance: instanceView(inst) },
+      { status: result.ok ? 200 : 500 },
+    );
+  }
+
+  return NextResponse.json(
+    {
+      error:
+        'action must be "sync", "provision", "provision_all" or "prune" — Linux accounts are ' +
+        'created with useradd, and the panel mirrors them automatically',
+    },
+    { status: 400 },
+  );
 }
 
 export async function PATCH(req: Request) {
-  const g = requireAdmin(req);
+  const g = guard(req, 'users.manage');
   if (!g.ok) return g.response;
+  const denial = await elevation(req, g.user);
+  if (denial) return denial;
 
   let body: UpdateBody | null = null;
   try {
@@ -86,48 +187,50 @@ export async function PATCH(req: Request) {
     return NextResponse.json({ error: 'valid user id required' }, { status: 400 });
   }
 
-  // Never allow removing the last admin.
-  if (body?.is_admin === false) {
-    const target = listUsers().find((u) => u.id === id);
-    if (target?.is_admin && countAdmins() <= 1) {
-      return NextResponse.json({ error: 'cannot demote the last admin' }, { status: 400 });
-    }
+  // Admin is not the panel's to grant: it mirrors sudo on the server. Say so
+  // plainly instead of silently ignoring it, which would look like a bug.
+  if (body?.is_admin !== undefined) {
+    return NextResponse.json(
+      {
+        error:
+          'admin follows sudo on this server, so the panel cannot grant or revoke it — ' +
+          'use `sudo usermod -aG sudo <user>` (or the equivalent on your distro)',
+        admin_from_os: true,
+      },
+      { status: 409 },
+    );
   }
 
-  if (body?.password) {
-    const target = listUsers().find((u) => u.id === id);
-    if (!target) return NextResponse.json({ error: 'user not found' }, { status: 404 });
-    const problem = passwordProblem(body.password, target.username);
-    if (problem) return NextResponse.json({ error: problem }, { status: 400 });
+  try {
+    const user = updateUser(id, {
+      permissions:
+        body?.permissions !== undefined ? normalizePermissions(body.permissions) : undefined,
+      enabled: body?.enabled,
+    });
+    if (!user) return NextResponse.json({ error: 'user not found' }, { status: 404 });
+    audit(req, g.user, 'update user access', {
+      username: user.username,
+      enabled: user.enabled,
+      permissions: body?.permissions !== undefined ? user.permissions : undefined,
+    });
+    return NextResponse.json({ ok: true, user: view(user), users: viewAll() });
+  } catch (e) {
+    return NextResponse.json(
+      { error: e instanceof Error ? e.message : 'cannot update user' },
+      { status: 400 },
+    );
   }
-
-  const user = updateUser(id, {
-    is_admin: body?.is_admin,
-    permissions: body?.permissions !== undefined ? normalizePermissions(body.permissions) : undefined,
-    password: body?.password,
-    must_change_password: body?.must_change_password,
-  });
-  if (!user) return NextResponse.json({ error: 'user not found' }, { status: 404 });
-  return NextResponse.json({ ok: true, user });
 }
 
-export async function DELETE(req: Request) {
-  const g = requireAdmin(req);
-  if (!g.ok) return g.response;
+function viewAll() {
+  return listUsers().map(view);
+}
 
-  const id = Number(new URL(req.url).searchParams.get('id'));
-  if (!Number.isInteger(id) || id <= 0) {
-    return NextResponse.json({ error: 'valid user id required' }, { status: 400 });
-  }
-  if (id === g.user.id) {
-    return NextResponse.json({ error: 'you cannot delete your own account' }, { status: 400 });
-  }
-  const target = listUsers().find((u) => u.id === id);
-  if (target?.is_admin && countAdmins() <= 1) {
-    return NextResponse.json({ error: 'cannot delete the last admin' }, { status: 400 });
-  }
-  if (!deleteUser(id)) {
-    return NextResponse.json({ error: 'user not found' }, { status: 404 });
-  }
-  return NextResponse.json({ ok: true });
+function view(u: ReturnType<typeof listUsers>[number]) {
+  return {
+    ...u,
+    instance: u.instance ? instanceView(u.instance) : null,
+    // Where this account's privileges come from, so the UI can explain them.
+    sudo: { has_sudo: u.sudo.has_sudo, source: u.sudo.source, nopass_hint: u.sudo.nopass_hint },
+  };
 }

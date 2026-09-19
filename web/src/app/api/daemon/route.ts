@@ -1,8 +1,9 @@
 import { NextResponse } from 'next/server';
 import { daemonAction, daemonStatus, type DaemonAction } from '@/lib/pm2';
 import { daemonBinaryCheck } from '@/lib/binary';
-import { binary } from '@/lib/env';
+import { binaryPath } from '@/lib/panel';
 import { guard } from '@/lib/auth';
+import { instanceView, pickInstance, pickInstanceForMutation } from '@/lib/routeutil';
 
 export const runtime = 'nodejs';
 
@@ -11,9 +12,19 @@ const ACTIONS: DaemonAction[] = ['start', 'stop', 'restart', 'save'];
 export async function GET(req: Request) {
   const g = guard(req, 'dashboard.view');
   if (!g.ok) return g.response;
-  const status = await daemonStatus();
-  // Flag a daemon that is still running a binary since replaced on disk.
-  return NextResponse.json({ ...status, binary: daemonBinaryCheck(status.pid, binary()) });
+
+  const picked = pickInstance(req, g.user);
+  if (!picked.ok) return picked.response;
+  const inst = picked.inst;
+
+  const status = await daemonStatus(inst);
+  // Each instance has its own pm2 daemon and app name, so this reports — and can
+  // only affect — the caller's own backups.
+  return NextResponse.json({
+    ...status,
+    instance: instanceView(inst),
+    binary: daemonBinaryCheck(status.pid, binaryPath()),
+  });
 }
 
 export async function POST(req: Request) {
@@ -34,8 +45,12 @@ export async function POST(req: Request) {
     );
   }
 
-  const res = await daemonAction(action);
-  const status = await daemonStatus();
+  const picked = await pickInstanceForMutation(req, g.user, body);
+  if (!picked.ok) return picked.response;
+  const inst = picked.inst;
+
+  const res = await daemonAction(inst, action);
+  const status = await daemonStatus(inst);
   return NextResponse.json({
     ok: res.ok,
     code: res.code,

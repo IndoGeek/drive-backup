@@ -9,7 +9,9 @@ import {
   Radio,
   RefreshCw,
   ScrollText,
+  ShieldCheck,
 } from 'lucide-react';
+import { AuditPanel } from '@/components/audit-panel';
 import {
   Badge,
   Button,
@@ -45,6 +47,10 @@ function human(bytes: number): string {
 
 const isErrorLog = (name: string) => /error/i.test(name);
 
+/** The one tab that is not a file: the privileged-action audit trail. */
+const AUDIT_TAB = 'audit';
+const isAuditTab = (id: string | undefined) => id === AUDIT_TAB;
+
 export default function LogsPage() {
   const { loading: meLoading, can } = useMe();
   const [sources, setSources] = useState<LogSource[]>([]);
@@ -69,11 +75,26 @@ export default function LogsPage() {
     void loadSources();
   }, [loadSources]);
 
-  const active = sources.find((s) => s.id === activeId) ?? sources[0];
+  // The audit trail is not a file: it is a tab of its own, for admins only.
+  const canAudit = can('users.manage');
+  const auditTabs: LogSource[] = canAudit
+    ? [
+        {
+          id: AUDIT_TAB,
+          label: 'Privileged',
+          description: 'Who elevated, and what they changed with it.',
+          dir: 'panel database',
+          files: [],
+        },
+      ]
+    : [];
+  const active = isAuditTab(activeId)
+    ? auditTabs[0]
+    : (sources.find((s) => s.id === activeId) ?? sources[0]);
   // Placeholder tab so the bar renders while the first request is in flight.
-  const tabs: LogSource[] = sources.length
+  const tabs: LogSource[] = [...(sources.length
     ? sources
-    : [{ id: 'backup', label: 'Backup', description: '', dir: '', files: [] }];
+    : [{ id: 'backup', label: 'Backup', description: '', dir: '', files: [] }]), ...auditTabs];
   const files = active?.files ?? [];
   // Derived, so a refresh doesn't clobber the user's choice; falls back to the
   // newest file in the tab until they pick one.
@@ -84,7 +105,8 @@ export default function LogsPage() {
     esRef.current?.close();
     esRef.current = null;
     setConnected(false);
-    if (!active || !selected) {
+    // The audit tab is rendered by AuditPanel; it has no file and no stream.
+    if (!active || !selected || isAuditTab(active.id)) {
       setContent('');
       return;
     }
@@ -145,17 +167,21 @@ export default function LogsPage() {
     );
   }
 
+  const onAuditTab = isAuditTab(activeId);
+
   return (
     <div className="space-y-6">
-      <div className="flex items-end justify-between">
-        <div>
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div className="min-w-0">
           <h1 className="text-xl font-semibold">Logs</h1>
           <p className="text-sm text-muted-foreground">{active?.description ?? '—'}</p>
         </div>
-        <div className="flex items-center gap-4">
-          <label className="flex items-center gap-2 text-sm">
-            <Switch checked={live} onCheckedChange={setLive} /> Live tail
-          </label>
+        <div className="flex flex-wrap items-center gap-3 sm:gap-4">
+          {!onAuditTab && (
+            <label className="flex items-center gap-2 text-sm">
+              <Switch checked={live} onCheckedChange={setLive} /> Live tail
+            </label>
+          )}
           <Button variant="outline" size="sm" onClick={() => void loadSources()}>
             <RefreshCw className="h-4 w-4" /> Refresh
           </Button>
@@ -179,16 +205,21 @@ export default function LogsPage() {
                   : 'border-b-transparent text-muted-foreground hover:text-foreground',
               )}
             >
-              <ScrollText className="h-4 w-4" />
+              {isAuditTab(s.id) ? <ShieldCheck className="h-4 w-4" /> : <ScrollText className="h-4 w-4" />}
               {s.label}
-              <span className="rounded bg-secondary px-1.5 py-0.5 text-[11px] text-muted-foreground">
-                {s.files.length}
-              </span>
+              {!isAuditTab(s.id) && (
+                <span className="rounded bg-secondary px-1.5 py-0.5 text-[11px] text-muted-foreground">
+                  {s.files.length}
+                </span>
+              )}
             </button>
           );
         })}
       </div>
 
+      {onAuditTab ? (
+        <AuditPanel />
+      ) : (
       <div className="grid gap-6 lg:grid-cols-[280px_1fr]">
         <Card className="min-w-0">
           <CardHeader>
@@ -268,6 +299,7 @@ export default function LogsPage() {
           </CardContent>
         </Card>
       </div>
+      )}
     </div>
   );
 }

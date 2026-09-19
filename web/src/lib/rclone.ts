@@ -1,5 +1,15 @@
-import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import crypto from 'node:crypto';
+import type { ChildProcessWithoutNullStreams } from 'node:child_process';
+import { runAs, spawnAs, type Instance } from './instance';
+
+/**
+ * rclone runs as the instance's Linux user, with that user's HOME and
+ * RCLONE_CONFIG. Two consequences worth stating:
+ *
+ *  - a remote created here is visible only to that user's rclone config;
+ *  - `rclone authorize`'s 127.0.0.1 callback binds on the server, so the paste
+ *    flow exists for browsers that cannot reach it.
+ */
 
 export type AuthMethod = 'browser' | 'client';
 
@@ -17,6 +27,8 @@ export type AuthJobView = {
 };
 
 type AuthJob = AuthJobView & {
+  /** Linux user who started it — jobs must not leak across tenants. */
+  owner: string;
   token?: Record<string, unknown>;
 };
 
@@ -55,19 +67,21 @@ export function parsePastedToken(text: string): Record<string, unknown> | null {
   return extractToken(text) ?? null;
 }
 
-export function startAuth(opts: {
-  method: AuthMethod;
-  clientId?: string;
-  clientSecret?: string;
-}): AuthJobView {
+export function startAuth(
+  inst: Instance,
+  opts: { method: AuthMethod; clientId?: string; clientSecret?: string },
+): AuthJobView {
   const id = crypto.randomUUID();
   const args = ['authorize', '--auth-no-open-browser', 'drive'];
+  // The token must be minted for the same client the instance will refresh with:
+  // drive.rs only passes client_id/client_secret to rclone when they are set.
   if (opts.method === 'client' && opts.clientId) {
     args.push(opts.clientId, opts.clientSecret ?? '');
   }
-  const proc = spawn('rclone', args, { env: process.env });
+  const proc = spawnAs(inst, 'rclone', args);
   const job: AuthJob = {
     id,
+    owner: inst.osUser,
     method: opts.method,
     clientId: opts.clientId,
     output: '',
@@ -109,57 +123,59 @@ export function startAuth(opts: {
   return publicView(job);
 }
 
-export function getAuthJob(id: string): AuthJobView | null {
+/**
+ * Fetch a job only if it belongs to this Linux user, so one tenant cannot read or
+ * cancel another's authorization (which would expose a live OAuth token).
+ */
+export function getAuthJob(id: string | undefined, owner: string): AuthJobView | null {
+  if (!id) return null;
   const job = jobs.get(id);
-  return job ? publicView(job) : null;
+  if (!job || job.owner !== owner) return null;
+  return publicView(job);
 }
 
-/** The parsed token, once the job finished successfully. */
-export function getAuthToken(id: string): Record<string, unknown> | undefined {
-  return jobs.get(id)?.token;
+/** The parsed token, once the job finished successfully and belongs to `owner`. */
+export function getAuthToken(id: string | undefined, owner: string): Record<string, unknown> | undefined {
+  if (!id) return undefined;
+  const job = jobs.get(id);
+  if (!job || job.owner !== owner) return undefined;
+  return job.token;
 }
 
-export function cancelAuth(id: string): boolean {
+export function cancelAuth(id: string | undefined, owner: string): boolean {
+  if (!id) return false;
+  const job = jobs.get(id);
+  if (!job || job.owner !== owner) return false;
   const proc = procs.get(id);
   if (!proc) return false;
   proc.kill('SIGTERM');
   procs.delete(id);
-  const job = jobs.get(id);
-  if (job) {
-    job.done = true;
-    job.ok = false;
-    job.error = 'cancelled';
-  }
+  job.done = true;
+  job.ok = false;
+  job.error = 'cancelled';
   return true;
 }
 
 function publicView(job: AuthJob): AuthJobView {
-  const { token: _token, ...rest } = job;
+  const { token: _token, owner: _owner, ...rest } = job;
   // Hide the raw token from status responses; it is fetched separately on save.
   return { ...rest, hasToken: Boolean(job.token), output: job.output.slice(-8000) };
 }
 
 /**
- * Create/update a non-OAuth rclone remote (e.g. Backblaze B2) using rclone's
- * own config tooling, so credentials are stored the way rclone expects and the
- * backup-mgr `ensure_remote_section` leaves the section untouched.
+ * Create/update a non-OAuth rclone remote (e.g. Backblaze B2) using rclone's own
+ * config tooling as the instance user, so credentials land in that user's rclone
+ * config and the backup-mgr `ensure_remote_section` leaves the section untouched.
  */
-export function createB2Remote(opts: {
-  remote: string;
-  account: string;
-  key: string;
-}): Promise<{ ok: boolean; output: string }> {
-  return new Promise((resolve) => {
-    execFile(
-      'rclone',
-      ['config', 'create', opts.remote, 'b2', 'account', opts.account, 'key', opts.key],
-      { env: process.env, timeout: 60_000 },
-      (err, stdout, stderr) => {
-        resolve({
-          ok: !err,
-          output: (String(stdout ?? '') + String(stderr ?? '')).trim(),
-        });
-      },
-    );
-  });
+export async function createB2Remote(
+  inst: Instance,
+  opts: { remote: string; account: string; key: string },
+): Promise<{ ok: boolean; output: string }> {
+  const res = await runAs(
+    inst,
+    'rclone',
+    ['config', 'create', opts.remote, 'b2', 'account', opts.account, 'key', opts.key],
+    { timeoutMs: 60_000 },
+  );
+  return { ok: res.ok, output: `${res.stdout}${res.stderr}`.trim() };
 }

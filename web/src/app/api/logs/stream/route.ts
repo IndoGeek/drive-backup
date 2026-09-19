@@ -1,7 +1,9 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { backupLogDir, findLogSource, logSourceDefs } from '@/lib/logs';
+import { runAs, type Instance } from '@/lib/instance';
 import { guard } from '@/lib/auth';
+import { pickInstance } from '@/lib/routeutil';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -9,34 +11,76 @@ export const dynamic = 'force-dynamic';
 const INITIAL_BYTES = 20_000;
 const POLL_MS = 1500;
 
+/**
+ * Instance logs are owned by another Linux user and cannot be opened directly, so
+ * size and content are fetched as that user. Panel logs are the panel's own and
+ * are read with plain fs calls — the same distinction the listing code makes.
+ */
+async function sizeOf(inst: Instance, full: string, access: 'instance' | 'panel'): Promise<number | null> {
+  if (access === 'panel') {
+    try {
+      return (await fs.stat(full)).size;
+    } catch {
+      return null;
+    }
+  }
+  const res = await runAs(inst, 'stat', ['-c', '%s', '--', full], { timeoutMs: 15_000 });
+  if (!res.ok) return null;
+  const n = Number(res.stdout.trim());
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Everything from `offset` onwards. Returns null when the file is unreadable. */
+async function readFrom(
+  inst: Instance,
+  full: string,
+  offset: number,
+  access: 'instance' | 'panel',
+): Promise<string | null> {
+  if (access === 'panel') {
+    try {
+      const st = await fs.stat(full);
+      const len = st.size - offset;
+      if (len <= 0) return '';
+      const fh = await fs.open(full, 'r');
+      try {
+        const buf = Buffer.alloc(len);
+        await fh.read(buf, 0, len, offset);
+        return buf.toString('utf8');
+      } finally {
+        await fh.close();
+      }
+    } catch {
+      return null;
+    }
+  }
+  // `-c +N` is 1-based, so byte `offset` is the first byte not yet sent.
+  const res = await runAs(inst, 'tail', ['-c', `+${offset + 1}`, '--', full], { timeoutMs: 15_000 });
+  return res.ok ? res.stdout : null;
+}
+
 export async function GET(req: Request) {
   const g = guard(req, 'logs.view');
   if (!g.ok) return g.response;
+
+  const picked = pickInstance(req, g.user);
+  if (!picked.ok) return picked.response;
+  const inst = picked.inst;
 
   const params = new URL(req.url).searchParams;
   const sourceId = params.get('source') ?? 'backup';
   const file = params.get('file');
   if (!file) return new Response('missing file', { status: 400 });
 
-  let dir: string;
-  try {
-    const def = findLogSource(logSourceDefs(await backupLogDir()), sourceId);
-    if (!def) return new Response(`unknown log source '${sourceId}'`, { status: 400 });
-    dir = def.dir;
-  } catch {
-    return new Response('cannot read config.yml', { status: 500 });
-  }
+  const def = findLogSource(logSourceDefs(inst, await backupLogDir(inst)), sourceId);
+  if (!def) return new Response(`unknown log source '${sourceId}'`, { status: 400 });
 
-  const full = path.join(dir, path.basename(file)); // basename prevents traversal
+  const full = path.join(def.dir, path.basename(file)); // basename prevents traversal
   const encoder = new TextEncoder();
 
   let offset = 0;
-  try {
-    const st = await fs.stat(full);
-    offset = Math.max(0, st.size - INITIAL_BYTES);
-  } catch {
-    // file may not exist yet; stream will start from 0
-  }
+  const size = await sizeOf(inst, full, def.access);
+  if (size !== null) offset = Math.max(0, size - INITIAL_BYTES);
 
   let closed = false;
   let interval: ReturnType<typeof setInterval> | null = null;
@@ -56,19 +100,20 @@ export async function GET(req: Request) {
       const tick = async () => {
         if (closed) return;
         try {
-          const st = await fs.stat(full);
-          if (st.size < offset) offset = 0; // rotated or truncated
-          if (st.size > offset) {
-            const fh = await fs.open(full, 'r');
-            try {
-              const len = st.size - offset;
-              const buf = Buffer.alloc(len);
-              await fh.read(buf, 0, len, offset);
-              offset = st.size;
-              frame('data', buf.toString('utf8'));
-            } finally {
-              await fh.close();
+          const current = await sizeOf(inst, full, def.access);
+          if (current === null) {
+            frame('error', 'cannot read log file');
+            return;
+          }
+          if (current < offset) offset = 0; // rotated or truncated
+          if (current > offset) {
+            const chunk = await readFrom(inst, full, offset, def.access);
+            if (chunk === null) {
+              frame('error', 'cannot read log file');
+              return;
             }
+            offset += Buffer.byteLength(chunk, 'utf8');
+            frame('data', chunk);
           } else {
             controller.enqueue(encoder.encode(': keepalive\n\n'));
           }

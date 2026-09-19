@@ -1,13 +1,7 @@
 import { NextResponse } from 'next/server';
-import {
-  backupLogDir,
-  findLogSource,
-  listLogs,
-  listLogSources,
-  logSourceDefs,
-  readLog,
-} from '@/lib/logs';
+import { backupLogDir, findLogSource, listLogSources, logSourceDefs, readLog } from '@/lib/logs';
 import { guard } from '@/lib/auth';
+import { instanceView, pickInstance } from '@/lib/routeutil';
 
 export const runtime = 'nodejs';
 
@@ -15,12 +9,13 @@ export async function GET(req: Request) {
   const g = guard(req, 'logs.view');
   if (!g.ok) return g.response;
 
-  let defs;
-  try {
-    defs = logSourceDefs(await backupLogDir());
-  } catch {
-    return NextResponse.json({ error: 'cannot read config.yml' }, { status: 500 });
-  }
+  const picked = pickInstance(req, g.user);
+  if (!picked.ok) return picked.response;
+  const inst = picked.inst;
+
+  // Not provisioned is fine here: backupLogDir falls back to the conventional
+  // location and simply reports no backup logs yet.
+  const defs = logSourceDefs(inst, await backupLogDir(inst));
 
   const url = new URL(req.url);
   const sourceId = url.searchParams.get('source');
@@ -29,7 +24,10 @@ export async function GET(req: Request) {
   // No source given: hand back every kind of log with its files, so the Logs
   // page needs a single request to render all its tabs.
   if (!sourceId) {
-    return NextResponse.json({ sources: await listLogSources(defs) });
+    return NextResponse.json({
+      sources: await listLogSources(inst, defs),
+      instance: instanceView(inst),
+    });
   }
 
   const def = findLogSource(defs, sourceId);
@@ -38,20 +36,13 @@ export async function GET(req: Request) {
   }
 
   if (!file) {
-    return NextResponse.json({
-      source: def.id,
-      dir: def.dir,
-      files: await listLogs(def.dir, def.match),
-    });
+    const [{ files }] = await listLogSources(inst, [def]);
+    return NextResponse.json({ source: def.id, dir: def.dir, files });
   }
 
-  try {
-    const content = await readLog(def.dir, file);
-    return NextResponse.json({ source: def.id, dir: def.dir, file, content });
-  } catch (e) {
-    return NextResponse.json(
-      { error: e instanceof Error ? e.message : 'cannot read log' },
-      { status: 404 },
-    );
+  const content = await readLog(inst, def, file);
+  if (content === null) {
+    return NextResponse.json({ error: `cannot read ${file}` }, { status: 404 });
   }
+  return NextResponse.json({ source: def.id, dir: def.dir, file, content });
 }

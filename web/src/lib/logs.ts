@@ -1,30 +1,43 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { getPath, readConfig, resolveInConfig } from './config';
-import { projectRoot } from './env';
+import { getPath, readInstanceConfig, resolveInInstance } from './config';
+import { listFilesAs, readTailAs, type Instance } from './instance';
+import { panelDir } from './panel';
 
 export type LogFile = { name: string; size: number; mtime: string };
 
 /**
- * A distinct kind of log. Several kinds can share one directory — the backup
- * logs and the daemon's pm2 logs both default to `<root>/logs` — so each source
+ * A distinct kind of log. Two access modes matter now:
+ *
+ *  - `instance` logs belong to one Linux user (their backup output and their
+ *    daemon's pm2 capture) and are reachable only by running as that account.
+ *  - `panel` logs are the panel's own and are read directly.
+ *
+ * Several kinds can share one directory — a generated ecosystem puts the daemon's
+ * pm2 capture in `<instance>/logs`, beside the backup logs — so each source
  * filters by filename rather than by directory alone.
  */
 export type LogSourceDef = {
   id: string;
   label: string;
   description: string;
+  access: 'instance' | 'panel';
   dir: string;
   match: (name: string) => boolean;
 };
 
 export type LogSourceView = Omit<LogSourceDef, 'match'> & { files: LogFile[] };
 
-/** The backup log directory, from `logging.dir` in config.yml. */
-export async function backupLogDir(): Promise<string> {
-  const cfg = await readConfig();
-  const rel = getPath(cfg, 'logging.dir');
-  return resolveInConfig(typeof rel === 'string' && rel ? rel : './logs');
+/** The instance's backup log directory, from `logging.dir` in its config.yml. */
+export async function backupLogDir(inst: Instance): Promise<string> {
+  try {
+    const cfg = await readInstanceConfig(inst);
+    const rel = getPath(cfg, 'logging.dir');
+    return resolveInInstance(inst, typeof rel === 'string' && rel ? rel : './logs');
+  } catch {
+    // Unprovisioned instance: fall back to the conventional location.
+    return inst.logsDir;
+  }
 }
 
 /** pm2's own stdout/stderr capture is `<name>.log` and `<name>-error.log`. */
@@ -32,12 +45,13 @@ function isPm2Pair(name: string, app: string): boolean {
   return name === `${app}.log` || name === `${app}-error.log`;
 }
 
-export function logSourceDefs(backupDir: string, root = projectRoot()): LogSourceDef[] {
+export function logSourceDefs(inst: Instance, backupDir: string): LogSourceDef[] {
   return [
     {
       id: 'backup',
       label: 'Backup',
-      description: 'Output of backup runs and the scheduler, one file per day.',
+      description: 'Output of this instance’s backup runs and scheduler, one file per day.',
+      access: 'instance',
       dir: backupDir,
       // `!pm2` matters: the daemon's pm2 capture lives in this same directory.
       match: (n) => n.endsWith('.log') && !n.startsWith('pm2'),
@@ -45,38 +59,51 @@ export function logSourceDefs(backupDir: string, root = projectRoot()): LogSourc
     {
       id: 'daemon',
       label: 'Daemon (pm2)',
-      description: 'stdout/stderr of the backup-mgr process, captured by pm2.',
-      dir: path.join(root, 'logs'),
+      description: 'stdout/stderr of this instance’s backup-mgr process, captured by pm2.',
+      access: 'instance',
+      dir: inst.logsDir,
       match: (n) => isPm2Pair(n, 'pm2'),
     },
     {
       id: 'panel',
       label: 'Panel (pm2)',
-      description: 'stdout/stderr of the web panel process, captured by pm2.',
-      dir: path.join(root, 'web', 'logs'),
+      description: 'stdout/stderr of the web panel itself — shared by every user.',
+      access: 'panel',
+      dir: path.join(panelDir(), 'logs'),
       match: (n) => isPm2Pair(n, 'pm2-web'),
     },
   ];
 }
 
-export async function listLogs(
-  dir: string,
-  match: (name: string) => boolean = () => true,
-): Promise<LogFile[]> {
+/** Read the tail of a panel-owned log directly (the panel owns these files). */
+async function readPanelTail(full: string, maxBytes: number): Promise<string | null> {
+  try {
+    const st = await fs.stat(full);
+    const start = Math.max(0, st.size - maxBytes);
+    const fh = await fs.open(full, 'r');
+    try {
+      const len = st.size - start;
+      const buf = Buffer.alloc(len);
+      await fh.read(buf, 0, len, start);
+      return buf.toString('utf8');
+    } finally {
+      await fh.close();
+    }
+  } catch {
+    return null;
+  }
+}
+
+async function listPanelLogs(dir: string): Promise<LogFile[]> {
   try {
     const entries = await fs.readdir(dir, { withFileTypes: true });
-    const files = await Promise.all(
+    return await Promise.all(
       entries
-        .filter((e) => e.isFile() && (e.name.endsWith('.log') || e.name.endsWith('.txt')))
-        .filter((e) => match(e.name))
+        .filter((e) => e.isFile())
         .map(async (e) => {
           const st = await fs.stat(path.join(dir, e.name));
           return { name: e.name, size: st.size, mtime: st.mtime.toISOString() };
         }),
-    );
-    // Newest first, so the most recent log is the default selection.
-    return files.sort((a, b) =>
-      a.mtime === b.mtime ? b.name.localeCompare(a.name) : b.mtime.localeCompare(a.mtime),
     );
   } catch {
     return [];
@@ -84,9 +111,26 @@ export async function listLogs(
 }
 
 /** Every source with its current files, in one pass (one request for the UI). */
-export async function listLogSources(defs: LogSourceDef[]): Promise<LogSourceView[]> {
+export async function listLogSources(
+  inst: Instance,
+  defs: LogSourceDef[],
+): Promise<LogSourceView[]> {
   return Promise.all(
-    defs.map(async ({ match, ...rest }) => ({ ...rest, files: await listLogs(rest.dir, match) })),
+    defs.map(async ({ match, ...rest }) => {
+      let files: LogFile[];
+      if (rest.access === 'panel') {
+        files = (await listPanelLogs(rest.dir)).filter((f) => f.name.endsWith('.log'));
+      } else {
+        files = (await listFilesAs(inst, rest.dir)).filter(
+          (f) => (f.name.endsWith('.log') || f.name.endsWith('.txt')) && match(f.name),
+        );
+      }
+      // Newest first, so the most recent log is the default selection.
+      files.sort((a, b) =>
+        a.mtime === b.mtime ? b.name.localeCompare(a.name) : b.mtime.localeCompare(a.mtime),
+      );
+      return { ...rest, files };
+    }),
   );
 }
 
@@ -95,18 +139,14 @@ export function findLogSource(defs: LogSourceDef[], id: string | null): LogSourc
   return defs.find((d) => d.id === id) ?? null;
 }
 
-export async function readLog(dir: string, name: string, maxBytes = 200_000): Promise<string> {
+export async function readLog(
+  inst: Instance,
+  def: LogSourceDef,
+  name: string,
+  maxBytes = 200_000,
+): Promise<string | null> {
   const safe = path.basename(name); // no traversal
-  const full = path.join(dir, safe);
-  const st = await fs.stat(full);
-  const start = Math.max(0, st.size - maxBytes);
-  const fh = await fs.open(full, 'r');
-  try {
-    const len = st.size - start;
-    const buf = Buffer.alloc(len);
-    await fh.read(buf, 0, len, start);
-    return buf.toString('utf8');
-  } finally {
-    await fh.close();
-  }
+  const full = path.join(def.dir, safe);
+  if (def.access === 'panel') return readPanelTail(full, maxBytes);
+  return readTailAs(inst, full, maxBytes);
 }

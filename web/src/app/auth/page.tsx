@@ -42,6 +42,7 @@ type Job = {
 type Target = 'primary' | 'secondary';
 type Backend = 'drive' | 'b2';
 type Method = 'browser' | 'client' | 'paste';
+type PasteInfo = { client_id: string; has_client_secret: boolean };
 
 export default function AuthPage() {
   const { loading: meLoading, can } = useMe();
@@ -52,6 +53,7 @@ export default function AuthPage() {
   const [clientId, setClientId] = useState('');
   const [clientSecret, setClientSecret] = useState('');
   const [pasteToken, setPasteToken] = useState('');
+  const [pasteInfo, setPasteInfo] = useState<PasteInfo | null>(null);
 
   const [b2Remote, setB2Remote] = useState('b2');
   const [b2Account, setB2Account] = useState('');
@@ -65,6 +67,13 @@ export default function AuthPage() {
 
   const isDrive = target === 'primary' || backend === 'drive';
 
+  // Must match `google_drive.client_id` / `storage.secondary.client_id` in
+  // config.yml: drive.rs only passes client creds to rclone when they are
+  // non-empty, so a blank pair means rclone's own built-in client.
+  const pasteCmd = pasteInfo?.client_id
+    ? `rclone authorize "drive" "${pasteInfo.client_id}" "<client_secret>"`
+    : 'rclone authorize "drive"';
+
   useEffect(() => {
     if (!job || job.done) return;
     const t = setInterval(async () => {
@@ -73,6 +82,24 @@ export default function AuthPage() {
     }, 2000);
     return () => clearInterval(t);
   }, [job]);
+
+  /**
+   * The paste flow only works if the token was minted for the same OAuth client
+   * this remote will refresh with, so ask the server which one that is.
+   */
+  useEffect(() => {
+    if (!isDrive || method !== 'paste') return;
+    let alive = true;
+    (async () => {
+      const res = await fetch(`/api/rclone/paste?target=${target}`);
+      if (!res.ok) return;
+      const data = (await res.json()) as PasteInfo;
+      if (alive) setPasteInfo(data);
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [isDrive, method, target]);
 
   function resetMessages() {
     setError(null);
@@ -171,6 +198,12 @@ export default function AuthPage() {
       body: JSON.stringify({ id: job.id }),
     });
     setJob({ ...job, done: true, ok: false, error: 'cancelled' });
+  }
+
+  async function copyCmd() {
+    await navigator.clipboard.writeText(pasteCmd);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
   }
 
   async function copyUrl() {
@@ -327,8 +360,8 @@ export default function AuthPage() {
                   <ClipboardPaste className="h-4 w-4 text-primary" /> Paste token
                 </div>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  Run <code className="font-mono">rclone authorize drive</code> where you have a
-                  browser and paste the token.
+                  Run <code className="font-mono">rclone authorize</code> on any machine with a
+                  browser (your laptop is fine) and paste the token.
                 </p>
               </button>
             </div>
@@ -358,6 +391,36 @@ export default function AuthPage() {
 
             {method === 'paste' ? (
               <div className="space-y-3">
+                <div className="rounded-md border border-border bg-muted/30 p-3 text-xs">
+                  <p className="font-medium">
+                    Run this on any machine with a browser — it does not have to be the VPS, and the
+                    shell user does not matter:
+                  </p>
+                  <div className="mt-2 flex items-start gap-2">
+                    <pre className="flex-1 overflow-x-auto rounded bg-background/70 p-2 font-mono text-[11px]">
+                      {pasteCmd}
+                    </pre>
+                    <Button variant="outline" size="sm" onClick={copyCmd}>
+                      <Copy className="h-3.5 w-3.5" /> {copied ? 'Copied' : 'Copy'}
+                    </Button>
+                  </div>
+                  {pasteInfo?.client_id ? (
+                    <p className="mt-2 text-muted-foreground">
+                      This remote has a client ID in <code className="font-mono">config.yml</code>,
+                      so it <strong>must</strong> be passed above — replace{' '}
+                      <code className="font-mono">&lt;client_secret&gt;</code> with the matching
+                      secret from the Config page. A token issued with rclone&apos;s built-in client
+                      authorizes fine but stops working about an hour later, when it first tries to
+                      refresh.
+                    </p>
+                  ) : (
+                    <p className="mt-2 text-muted-foreground">
+                      No client ID is set for this remote, so rclone&apos;s built-in client is used
+                      and no extra arguments are needed. If you later add a client ID on the Config
+                      page, re-run authorization with it.
+                    </p>
+                  )}
+                </div>
                 <div className="space-y-2">
                   <Label htmlFor="paste">Pasted token (JSON or full rclone output)</Label>
                   <Textarea
@@ -488,8 +551,11 @@ export default function AuthPage() {
             </details>
 
             <p className="text-xs text-muted-foreground">
-              Tip: rclone&apos;s callback is <code className="font-mono">127.0.0.1:53682</code>.
-              On a headless remote VPS, use the <strong>Paste token</strong> method instead.
+              Tip: rclone&apos;s callback is <code className="font-mono">127.0.0.1:53682</code> on
+              the <strong>server</strong>, so a browser on your own machine cannot reach it unless
+              you tunnel it (
+              <code className="font-mono">ssh -L 53682:127.0.0.1:53682 you@vps</code>). Otherwise
+              use the <strong>Paste token</strong> method.
             </p>
           </CardContent>
         </Card>

@@ -42,6 +42,7 @@ import {
 import { RestoreDialog } from '@/components/restore-dialog';
 import { cn } from '@/lib/cn';
 import { useMe } from '@/lib/use-me';
+import { useSudo } from '@/lib/sudo-client';
 
 type DaemonBinaryCheck = {
   restart_needed: boolean;
@@ -148,6 +149,9 @@ function readPath(obj: Record<string, unknown>, dotted: string): unknown {
 
 export default function DashboardPage() {
   const { me, loading: meLoading, can } = useMe();
+  // Privileged actions (reinstalling the shared binary) run under this user's own
+  // sudo; fetchElevated asks for the password only when sudo would.
+  const { fetchElevated } = useSudo();
 
   const [status, setStatus] = useState<Status | null>(null);
   const [runs, setRuns] = useState<RunRow[]>([]);
@@ -268,9 +272,11 @@ export default function DashboardPage() {
 
   async function rebuildBinary() {
     setBusy('rebuild');
-    setOutput('$ cargo build --release && sudo -n install -m 0755 target/release/backup-mgr …\n');
+    setOutput('$ cargo build --release && sudo install -m 0755 target/release/backup-mgr …\n');
     try {
-      const res = await fetch('/api/binary/install', { method: 'POST' });
+      // fetchElevated handles the sudo prompt: this installs under *your* sudo, so
+      // a host with NOPASSWD never asks and one that prompts asks once.
+      const res = await fetchElevated('/api/binary/install', { method: 'POST' });
       const data = (await res.json()) as {
         ok?: boolean;
         steps?: { step: string; ok: boolean; code: number | null; output: string }[];
@@ -279,7 +285,11 @@ export default function DashboardPage() {
         error?: string;
       };
       if (data.error) {
-        setOutput(`${data.error}\n`);
+        setOutput(
+          res.status === 428
+            ? 'sudo password required — nothing was installed.\n'
+            : `${data.error}\n`,
+        );
       } else {
         const body = (data.steps ?? [])
           .map(
@@ -341,8 +351,8 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-end justify-between">
-        <div>
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <h1 className="text-xl font-semibold">Dashboard</h1>
             {bin?.installed && (
@@ -729,7 +739,7 @@ export default function DashboardPage() {
               disabled={!can('backup.schedule')}
             />
           </div>
-          <div className="flex items-center gap-3 md:col-span-3">
+          <div className="flex flex-wrap items-center gap-3 md:col-span-3">
             <Button
               onClick={saveSchedule}
               disabled={savingSchedule || !can('backup.schedule')}

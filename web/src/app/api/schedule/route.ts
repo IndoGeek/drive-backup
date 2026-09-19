@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server';
-import { mutateConfig } from '@/lib/config';
+import { mutateInstanceConfig } from '@/lib/config';
 import { coerce, SCHEDULE_FIELDS, SCHEDULE_KEYS } from '@/lib/schema';
 import { guard } from '@/lib/auth';
+import { pickInstanceForMutation, requireProvisioned } from '@/lib/routeutil';
 
 export const runtime = 'nodejs';
 
@@ -21,6 +22,13 @@ export async function PUT(req: Request) {
     return NextResponse.json({ error: 'invalid body' }, { status: 400 });
   }
 
+  const picked = await pickInstanceForMutation(req, g.user, body);
+  if (!picked.ok) return picked.response;
+  const inst = picked.inst;
+
+  const notReady = await requireProvisioned(inst);
+  if (notReady) return notReady;
+
   const updates: [string, unknown][] = [];
   for (const [key, value] of Object.entries(body.values)) {
     const field = SCHEDULE_FIELD_BY_KEY.get(key);
@@ -33,7 +41,7 @@ export async function PUT(req: Request) {
   }
 
   try {
-    await mutateConfig((doc) => {
+    await mutateInstanceConfig(inst, (doc) => {
       for (const [key, value] of updates) doc.setIn(key.split('.'), value);
     });
   } catch (e) {

@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server';
 import { getAuthToken } from '@/lib/rclone';
-import { mutateConfig } from '@/lib/config';
+import { mutateInstanceConfig } from '@/lib/config';
 import { guard } from '@/lib/auth';
+import { pickInstanceForMutation, requireProvisioned } from '@/lib/routeutil';
 
 export const runtime = 'nodejs';
 
@@ -17,10 +18,17 @@ export async function POST(req: Request) {
   }
   if (!body?.id) return NextResponse.json({ error: 'missing job id' }, { status: 400 });
 
+  const picked = await pickInstanceForMutation(req, g.user, body);
+  if (!picked.ok) return picked.response;
+  const inst = picked.inst;
+
+  const notReady = await requireProvisioned(inst);
+  if (notReady) return notReady;
+
   const target = body.target === 'secondary' ? 'secondary' : 'primary';
   const path = target === 'secondary' ? ['storage', 'secondary'] : ['google_drive'];
 
-  const token = getAuthToken(body.id);
+  const token = getAuthToken(body.id, inst.osUser);
   if (!token) {
     return NextResponse.json(
       { error: 'no completed token for this job (has authorization finished?)' },
@@ -40,7 +48,8 @@ export async function POST(req: Request) {
   }
 
   try {
-    await mutateConfig((doc) => {
+    // Written into this instance's config.yml, as its owner, mode 0600.
+    await mutateInstanceConfig(inst, (doc) => {
       doc.setIn([...path, 'refresh_token'], refresh);
       doc.setIn([...path, 'access_token'], access);
       doc.setIn([...path, 'expiry'], expiry);

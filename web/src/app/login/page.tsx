@@ -29,7 +29,7 @@ export default function LoginPage() {
     const username = (form.elements.namedItem('username') as HTMLInputElement | null)?.value.trim() ?? '';
     const password = (form.elements.namedItem('password') as HTMLInputElement | null)?.value ?? '';
     if (!username || !password) {
-      setError('Enter your username and password.');
+      setError('Enter your Linux username and password.');
       return;
     }
 
@@ -41,13 +41,9 @@ export default function LoginPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password }),
       });
-      const data = (await res.json().catch(() => ({}))) as {
-        error?: string;
-        user?: { must_change_password?: boolean };
-      };
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
       if (res.ok) {
-        // A default/admin-assigned password must be replaced before anything else.
-        window.location.href = data.user?.must_change_password ? '/users' : '/';
+        window.location.href = '/';
         return;
       }
       setError(data.error ?? `Sign-in failed (HTTP ${res.status})`);
@@ -67,19 +63,16 @@ export default function LoginPage() {
             <span className="text-sm font-semibold uppercase tracking-wide">backup-mgr</span>
           </div>
           <CardTitle>Sign in</CardTitle>
-          <CardDescription>Enter your username and password to continue.</CardDescription>
+          <CardDescription>
+            Use your Linux account on this server — the same username and password you would use
+            for SSH.
+          </CardDescription>
         </CardHeader>
         <CardContent>
           <form onSubmit={submit} className="space-y-4">
             <div className="space-y-2">
               <Label htmlFor="username">Username</Label>
-              <Input
-                id="username"
-                name="username"
-                autoFocus
-                autoComplete="username"
-                defaultValue="admin"
-              />
+              <Input id="username" name="username" autoFocus autoComplete="username" />
             </div>
             <div className="space-y-2">
               <Label htmlFor="password">Password</Label>
@@ -97,9 +90,9 @@ export default function LoginPage() {
             </Button>
           </form>
           <p className="mt-4 text-xs text-muted-foreground">
-            First run creates a default admin — username <code className="font-mono">admin</code>,
-            password <code className="font-mono">admin</code>. You will be required to choose a new
-            password before the panel will do anything else.
+            There are no panel passwords. Access is your Linux account&apos;s, so{' '}
+            <code className="font-mono">passwd -l &lt;user&gt;</code> also locks the panel, and every
+            human account on the server can sign in to its own isolated instance.
           </p>
         </CardContent>
       </Card>

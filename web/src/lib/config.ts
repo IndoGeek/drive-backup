@@ -1,39 +1,53 @@
-import fs from 'node:fs/promises';
 import path from 'node:path';
 import { parseDocument, type Document } from 'yaml';
-import { configPath } from './env';
+import { readFileAs, writeFileAtomicAs, type Instance } from './instance';
 
 export type JsonObject = Record<string, unknown>;
 
-/** Parse config.yml into a plain object. */
-export async function readConfig(): Promise<JsonObject> {
-  const raw = await fs.readFile(configPath(), 'utf8');
-  const doc = parseDocument(raw);
-  return (doc.toJS() ?? {}) as JsonObject;
+/**
+ * config.yml belongs to one Linux user, is mode 0600, and holds that user's gpg
+ * passphrase, OAuth refresh token and Discord webhook. Everything here therefore
+ * goes through the instance's own identity rather than the panel's — a bug in a
+ * route cannot read another user's secrets, because the panel never has the
+ * permissions to.
+ */
+
+function missingConfig(inst: Instance): Error {
+  return new Error(
+    `cannot read ${inst.configPath} as '${inst.osUser}'. The instance may not be provisioned ` +
+      'yet — an administrator can create it from the Users page.',
+  );
+}
+
+/** Parse an instance's config.yml into a plain object. */
+export async function readInstanceConfig(inst: Instance): Promise<JsonObject> {
+  const raw = await readFileAs(inst, inst.configPath);
+  if (raw === null) throw missingConfig(inst);
+  return (parseDocument(raw).toJS() ?? {}) as JsonObject;
 }
 
 /**
- * Edit config.yml in place while preserving comments and key order, then write
- * it atomically with owner-only permissions (it holds secrets).
+ * Edit an instance's config.yml while preserving comments and key order, then
+ * replace it atomically with owner-only permissions.
+ *
+ * The write happens as the owning user via a temp file in the same directory, so
+ * a reader (the daemon, or the user themselves) never observes a partial file.
  */
-export async function mutateConfig(
+export async function mutateInstanceConfig(
+  inst: Instance,
   mutator: (doc: Document) => void,
 ): Promise<JsonObject> {
-  const p = configPath();
-  const raw = await fs.readFile(p, 'utf8');
+  const raw = await readFileAs(inst, inst.configPath);
+  if (raw === null) throw missingConfig(inst);
   const doc = parseDocument(raw);
   mutator(doc);
-  const text = String(doc);
-  const tmp = `${p}.web-${process.pid}.tmp`;
-  await fs.writeFile(tmp, text, { mode: 0o600 });
-  await fs.rename(tmp, p);
-  await fs.chmod(p, 0o600).catch(() => {});
+  await writeFileAtomicAs(inst, inst.configPath, String(doc), '600');
   return (doc.toJS() ?? {}) as JsonObject;
 }
 
-/** Resolve a path from config relative to the config file's directory. */
-export function resolveInConfig(p: string): string {
-  return path.isAbsolute(p) ? p : path.resolve(path.dirname(configPath()), p);
+/** Resolve a path from an instance's config relative to that config's directory. */
+export function resolveInInstance(inst: Instance, p: string): string {
+  return path.isAbsolute(p) ? p : path.resolve(path.dirname(inst.configPath), p);
 }
 
 /** Read a dotted path out of a plain object. */

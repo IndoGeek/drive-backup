@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server';
 import { parseTrailingJson, runCli, staleBinaryHint } from '@/lib/cli';
 import { guard } from '@/lib/auth';
-import { binary } from '@/lib/env';
+import { binaryPath } from '@/lib/panel';
+import { instanceView, pickInstance, requireProvisioned } from '@/lib/routeutil';
 
 export const runtime = 'nodejs';
 
@@ -39,18 +40,29 @@ export async function GET(req: Request) {
   const g = guard(req, 'dashboard.view');
   if (!g.ok) return g.response;
 
-  const res = await runCli(['status', '--json'], 30_000);
+  const picked = pickInstance(req, g.user);
+  if (!picked.ok) return picked.response;
+  const inst = picked.inst;
+
+  const notReady = await requireProvisioned(inst);
+  if (notReady) return notReady;
+
+  // Every command runs as the instance's own Linux user, against that user's
+  // config — so this reports only this instance's state.
+  const res = await runCli(inst, ['status', '--json'], 30_000);
   const parsed = parseTrailingJson<StatusPayload>(res.stdout);
   if (!parsed) {
     return NextResponse.json(
       {
-        error: `could not read status from the backup-mgr binary — ${staleBinaryHint()}`,
-        binary: binary(),
+        error: `could not read status for '${inst.osUser}' — ${staleBinaryHint()}`,
+        instance: instanceView(inst),
+        binary: binaryPath(),
+        spawn_error: res.spawnError ?? null,
         stderr: res.stderr,
         stdout: res.stdout,
       },
       { status: 502 },
     );
   }
-  return NextResponse.json(parsed);
+  return NextResponse.json({ ...parsed, instance: instanceView(inst) });
 }

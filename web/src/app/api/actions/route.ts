@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { runCli } from '@/lib/cli';
 import { guard } from '@/lib/auth';
+import { pickInstanceForMutation, requireProvisioned } from '@/lib/routeutil';
 import type { Permission } from '@/lib/permissions';
 
 export const runtime = 'nodejs';
@@ -82,6 +83,13 @@ export async function POST(req: Request) {
   const g = guard(req, permissionFor(body.action));
   if (!g.ok) return g.response;
 
+  const picked = await pickInstanceForMutation(req, g.user, body);
+  if (!picked.ok) return picked.response;
+  const inst = picked.inst;
+
+  const notReady = await requireProvisioned(inst);
+  if (notReady) return notReady;
+
   const args = buildArgs(body.action, body.options ?? {});
   if (!args) {
     return NextResponse.json(
@@ -90,8 +98,9 @@ export async function POST(req: Request) {
     );
   }
 
+  // Backup actions run as this instance's Linux user, touching only its own data.
   const timeout = body.action === 'run' ? 1000 * 60 * 60 * 2 : 1000 * 60 * 30;
-  const res = await runCli(args, timeout);
+  const res = await runCli(inst, args, timeout);
 
   return NextResponse.json({
     ok: res.ok,

@@ -42,7 +42,7 @@ export function installTarget(root: string, resolvedPath: string | null): string
  * Locate cargo. A panel started by pm2/systemd does not inherit an interactive
  * shell's PATH, so rustup's per-user install is checked explicitly.
  */
-export function resolveCargo(env: NodeJS.ProcessEnv = process.env): string {
+export function resolveCargo(env: Partial<NodeJS.ProcessEnv> = process.env): string {
   if (env.CARGO_BIN) return env.CARGO_BIN;
   const home = env.HOME || os.homedir();
   if (home) {
@@ -173,14 +173,51 @@ function run(
 }
 
 /**
+ * The argument list `install` needs to write `source` over `target`.
+ *
+ * Exactly one source and one target, and deliberately *not* including the command
+ * name: the caller passes 'install' as the program. Repeating it makes install
+ * read two sources, and it then insists the target be a directory.
+ */
+export function installArgs(source: string, target: string): string[] {
+  return ['-m', '0755', source, target];
+}
+
+/**
+ * The install half of a rebuild, supplied by the caller because it is privileged:
+ * the panel runs it under the *acting user's* sudo (see lib/sudo.ts), which is
+ * what makes NOPASSWD silent and a password prompt possible.
+ */
+export type InstallRunner = (
+  target: string,
+  root: string,
+) => Promise<{ code: number | null; output: string; step: string }>;
+
+/** Default runner: the old behaviour, for callers with no user context (tests). */
+export const defaultInstallRunner: InstallRunner = async (target, root) => {
+  const install = await run(
+    'sudo',
+    ['-n', 'install', ...installArgs('target/release/backup-mgr', target)],
+    root,
+    120_000,
+  );
+  return {
+    code: install.code,
+    output: install.output,
+    step: `sudo -n install -m 0755 target/release/backup-mgr ${target}`,
+  };
+};
+
+/**
  * Rebuild from the served checkout and install over `target`. Run as two
  * attributable steps so a compile failure is distinguishable from a permission
  * problem on the install.
- *
- * `sudo -n` is deliberate: it fails immediately when a password would be
- * required, instead of hanging a web request on a prompt nobody can answer.
  */
-export async function rebuildAndInstall(root: string, target: string): Promise<InstallStep[]> {
+export async function rebuildAndInstall(
+  root: string,
+  target: string,
+  installRunner: InstallRunner = defaultInstallRunner,
+): Promise<InstallStep[]> {
   const steps: InstallStep[] = [];
   const cargo = resolveCargo();
 
@@ -193,14 +230,9 @@ export async function rebuildAndInstall(root: string, target: string): Promise<I
   });
   if (build.code !== 0) return steps;
 
-  const install = await run(
-    'sudo',
-    ['-n', 'install', '-m', '0755', 'target/release/backup-mgr', target],
-    root,
-    120_000,
-  );
+  const install = await installRunner(target, root);
   steps.push({
-    step: `sudo -n install -m 0755 target/release/backup-mgr ${target}`,
+    step: install.step,
     ok: install.code === 0,
     code: install.code,
     output: install.output,

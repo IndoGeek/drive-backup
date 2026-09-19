@@ -163,7 +163,7 @@ export default function ConfigPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-end justify-between">
+      <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold">Configuration</h1>
           <p className="text-sm text-muted-foreground">
@@ -210,7 +210,7 @@ export default function ConfigPage() {
               <CardContent className="grid gap-5 md:grid-cols-2">
                 {section.fields.map((field) => (
                   <div key={field.key} className="space-y-2">
-                    <div className="flex items-center justify-between gap-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2 sm:gap-4">
                       <Label htmlFor={field.key}>{field.label}</Label>
                       {field.type === 'boolean' && (
                         <Switch
