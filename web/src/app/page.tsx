@@ -1,15 +1,19 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
   CalendarClock,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   Cloud,
   Download,
   HardDriveDownload,
   Loader2,
+  Minus,
   Play,
+  Plus,
   Power,
   RefreshCw,
   RotateCcw,
@@ -30,6 +34,7 @@ import {
   CardTitle,
   Input,
   Label,
+  Select,
   Switch,
   TBody,
   TD,
@@ -37,9 +42,9 @@ import {
   THead,
   TR,
   Table,
-  Textarea,
 } from '@/components/ui';
 import { RestoreDialog } from '@/components/restore-dialog';
+import { cleanTimes, evenSpacing, fmtMinute, minuteOf, normalizeTime } from '@/lib/schedule';
 import { cn } from '@/lib/cn';
 import { useMe } from '@/lib/use-me';
 import { useSudo } from '@/lib/sudo-client';
@@ -83,6 +88,10 @@ type Status = {
     timezone: string;
     encrypt_enabled: boolean;
     upload_to_all: boolean;
+    /** Exact run times, set only by a binary that understands `backup.times`. */
+    times?: string[];
+    /** The effective daily schedule, in HH:MM — what this build will actually do. */
+    schedule?: string[];
   };
   remotes: { label: string; retention: number }[];
   next_run_at?: string | null;
@@ -113,6 +122,9 @@ type RunRow = {
   error: string;
 };
 
+/** A second destination as it appears in config.yml (may be configured but off). */
+type SecondaryRemote = { enabled: boolean; remote: string; dir: string; retention: number };
+
 function human(bytes: number | null): string {
   if (bytes === null || bytes === undefined) return '—';
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -134,12 +146,6 @@ function countdown(ms: number): string {
   return `${h}h ${m}m ${sec}s`;
 }
 
-/** Build output is verbose; keep the tail so the failure is still visible. */
-function trimOutput(text: string, max = 3000): string {
-  if (text.length <= max) return text;
-  return `…(${text.length - max} earlier characters omitted)\n${text.slice(-max)}`;
-}
-
 function readPath(obj: Record<string, unknown>, dotted: string): unknown {
   return dotted.split('.').reduce<unknown>((acc, key) => {
     if (acc && typeof acc === 'object') return (acc as Record<string, unknown>)[key];
@@ -147,30 +153,45 @@ function readPath(obj: Record<string, unknown>, dotted: string): unknown {
   }, obj);
 }
 
+const PAGE_SIZES = [5, 10, 25];
+
 export default function DashboardPage() {
-  const { me, loading: meLoading, can } = useMe();
+  const { loading: meLoading, can } = useMe();
   // Privileged actions (reinstalling the shared binary) run under this user's own
   // sudo; fetchElevated asks for the password only when sudo would.
   const { fetchElevated } = useSudo();
 
   const [status, setStatus] = useState<Status | null>(null);
   const [runs, setRuns] = useState<RunRow[]>([]);
-  const [output, setOutput] = useState('');
+  const [runTotal, setRunTotal] = useState(0);
+  const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState(PAGE_SIZES[0]);
   const [busy, setBusy] = useState<string | null>(null);
   const [restoreOpen, setRestoreOpen] = useState(false);
   const [daemon, setDaemon] = useState<DaemonInfo | null>(null);
   const [bin, setBin] = useState<BinaryInfo | null>(null);
+  const [secondary, setSecondary] = useState<SecondaryRemote | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
 
   const [world, setWorld] = useState(false);
   const [noPtero, setNoPtero] = useState(true);
   const [force, setForce] = useState(false);
 
+  // Terminal
+  const [output, setOutput] = useState('');
+  const [running, setRunning] = useState(false);
+  const [lastResult, setLastResult] = useState<{ ok: boolean; code: number | null } | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const consoleRef = useRef<HTMLPreElement | null>(null);
+
+  // Schedule
+  const [mode, setMode] = useState<'even' | 'times'>('even');
   const [time, setTime] = useState('03:30');
   const [perDay, setPerDay] = useState('1');
-  const [worldTimes, setWorldTimes] = useState('');
+  const [times, setTimes] = useState<string[]>(['03:30']);
   const [savingSchedule, setSavingSchedule] = useState(false);
   const [scheduleMsg, setScheduleMsg] = useState<string | null>(null);
+  const [scheduleError, setScheduleError] = useState<string | null>(null);
 
   const loadStatus = useCallback(async () => {
     const res = await fetch('/api/status');
@@ -178,22 +199,46 @@ export default function DashboardPage() {
   }, []);
 
   const loadRuns = useCallback(async () => {
-    const res = await fetch('/api/history?limit=25');
+    const res = await fetch(`/api/history?limit=${pageSize}&offset=${page * pageSize}`);
     if (res.ok) {
-      const data = (await res.json()) as { runs?: RunRow[] };
+      const data = (await res.json()) as { runs?: RunRow[]; total?: number };
       setRuns(data.runs ?? []);
+      setRunTotal(data.total ?? data.runs?.length ?? 0);
     }
-  }, []);
+  }, [page, pageSize]);
 
   const loadSchedule = useCallback(async () => {
     const res = await fetch('/api/config');
     if (!res.ok) return;
     const data = (await res.json()) as { config?: Record<string, unknown> };
     const cfg = data.config ?? {};
-    setTime(String(readPath(cfg, 'backup.time') ?? '03:30'));
-    setPerDay(String(readPath(cfg, 'backup.backups_per_day') ?? '1'));
-    const times = readPath(cfg, 'world_backup.times');
-    setWorldTimes(Array.isArray(times) ? times.join('\n') : '');
+
+    const explicit = readPath(cfg, 'backup.times');
+    const list = Array.isArray(explicit)
+      ? explicit.map((t) => String(t)).filter((t) => t.trim() !== '')
+      : [];
+    const baseTime = String(readPath(cfg, 'backup.time') ?? '03:30');
+    const basePerDay = String(readPath(cfg, 'backup.backups_per_day') ?? '1');
+    setTime(baseTime);
+    setPerDay(basePerDay);
+    setTimes(list.length ? list : [baseTime]);
+    // Which rule the file currently uses decides which mode opens.
+    setMode(list.length ? 'times' : 'even');
+    // "configured but not used" is the state worth surfacing: a second destination
+    // that exists in the file but is switched off explains a Remotes card showing
+    // one entry on a server that looks like it has two.
+    const sec = readPath(cfg, 'storage.secondary');
+    if (sec && typeof sec === 'object') {
+      const s = sec as Record<string, unknown>;
+      setSecondary({
+        enabled: s.enabled === true,
+        remote: String(s.remote ?? ''),
+        dir: String(s.dir ?? ''),
+        retention: Number(s.retention ?? 0),
+      });
+    } else {
+      setSecondary(null);
+    }
   }, []);
 
   const loadDaemon = useCallback(async () => {
@@ -208,49 +253,125 @@ export default function DashboardPage() {
 
   useEffect(() => {
     void loadStatus();
-    void loadRuns();
     void loadSchedule();
     void loadDaemon();
     void loadBinary();
     const t = setInterval(() => void loadStatus(), 5000);
-    const t2 = setInterval(() => void loadRuns(), 20000);
     const t3 = setInterval(() => void loadDaemon(), 15000);
     const t4 = setInterval(() => void loadBinary(), 60000);
     const tick = setInterval(() => setNowMs(Date.now()), 1000);
     return () => {
       clearInterval(t);
-      clearInterval(t2);
       clearInterval(t3);
       clearInterval(t4);
       clearInterval(tick);
     };
-  }, [loadStatus, loadRuns, loadSchedule, loadDaemon, loadBinary]);
+  }, [loadStatus, loadSchedule, loadDaemon, loadBinary]);
 
-  async function doAction(action: string, options: Record<string, unknown> = {}) {
-    setBusy(action);
-    setOutput(`$ ${action} …\n`);
+  // History has its own effect so paging re-fetches without resetting the timers
+  // above, and so the poll always reloads the page the user is actually on.
+  useEffect(() => {
+    void loadRuns();
+    const t2 = setInterval(() => void loadRuns(), 20000);
+    return () => clearInterval(t2);
+  }, [loadRuns]);
+
+  // Keep the newest output in view as it streams in.
+  useEffect(() => {
+    const el = consoleRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [output]);
+
+  function append(text: string) {
+    setOutput((prev) => (prev + text).slice(-200_000));
+  }
+
+  /**
+   * Run an action and show its output as it arrives.
+   *
+   * The response is newline-delimited JSON, one message per line, so the panel can
+   * render progress instead of freezing until the process exits.
+   */
+  async function streamAction(
+    action: string,
+    options: Record<string, unknown> = {},
+    label?: string,
+  ) {
+    setBusy(label ?? action);
+    setRunning(true);
+    setLastResult(null);
+    setOutput('');
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     try {
-      const res = await fetch('/api/actions', {
+      const res = await fetch('/api/actions/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action, options }),
+        signal: controller.signal,
       });
-      const data = (await res.json()) as {
-        ok?: boolean;
-        code?: number | null;
-        output?: string;
-        error?: string;
-      };
-      setOutput(`${data.output ?? data.error ?? '(no output)'}\n\n[exit ${data.code ?? '?'}]`);
+
+      if (!res.ok || !res.body) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        append(`! ${data.error ?? `HTTP ${res.status}`}\n`);
+        setLastResult({ ok: false, code: null });
+        return;
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let nl = buffer.indexOf('\n');
+        while (nl >= 0) {
+          const line = buffer.slice(0, nl).trim();
+          buffer = buffer.slice(nl + 1);
+          nl = buffer.indexOf('\n');
+          if (!line) continue;
+          let msg: {
+            type?: string;
+            data?: string;
+            code?: number | null;
+            ok?: boolean;
+            command?: string;
+            message?: string;
+            signal?: string | null;
+          };
+          try {
+            msg = JSON.parse(line) as typeof msg;
+          } catch {
+            continue;
+          }
+          if (msg.type === 'start' && msg.command) append(`$ ${msg.command}\n\n`);
+          else if (msg.type === 'stdout' && msg.data) append(msg.data);
+          else if (msg.type === 'stderr' && msg.data) append(msg.data);
+          else if (msg.type === 'error') append(`\n! ${msg.message ?? 'the command could not run'}\n`);
+          else if (msg.type === 'exit') {
+            setLastResult({ ok: msg.code === 0, code: msg.code ?? null });
+          }
+        }
+      }
+    } catch (e) {
+      if ((e as Error).name === 'AbortError') append('\n[stopped]\n');
+      else append(`\n! ${e instanceof Error ? e.message : 'the panel could not reach the server'}\n`);
+      setLastResult((prev) => prev ?? { ok: false, code: null });
+    } finally {
+      setRunning(false);
+      setBusy(null);
+      abortRef.current = null;
       await loadStatus();
       await loadRuns();
-    } finally {
-      setBusy(null);
     }
   }
 
   async function controlDaemon(action: 'start' | 'stop' | 'restart') {
     setBusy(`daemon-${action}`);
+    setOutput('');
     try {
       const res = await fetch('/api/daemon', {
         method: 'POST',
@@ -263,7 +384,8 @@ export default function DashboardPage() {
         status?: DaemonInfo;
         error?: string;
       };
-      setOutput(`$ pm2 ${action}\n${data.output ?? data.error ?? ''}\n\n[exit ${data.code ?? '?'}]`);
+      setOutput(`$ pm2 ${action}\n${data.output ?? data.error ?? ''}\n`);
+      setLastResult({ ok: (data.code ?? 1) === 0, code: data.code ?? null });
       if (data.status) setDaemon(data.status);
     } finally {
       setBusy(null);
@@ -272,7 +394,9 @@ export default function DashboardPage() {
 
   async function rebuildBinary() {
     setBusy('rebuild');
-    setOutput('$ cargo build --release && sudo install -m 0755 target/release/backup-mgr …\n');
+    setRunning(true);
+    setLastResult(null);
+    setOutput('$ cargo build --release && sudo install -m 0755 target/release/backup-mgr …\n\n');
     try {
       // fetchElevated handles the sudo prompt: this installs under *your* sudo, so
       // a host with NOPASSWD never asks and one that prompts asks once.
@@ -285,59 +409,100 @@ export default function DashboardPage() {
         error?: string;
       };
       if (data.error) {
-        setOutput(
+        append(
           res.status === 428
-            ? 'sudo password required — nothing was installed.\n'
-            : `${data.error}\n`,
+            ? '! sudo password required — nothing was installed.\n'
+            : `! ${data.error}\n`,
         );
+        setLastResult({ ok: false, code: null });
       } else {
         const body = (data.steps ?? [])
-          .map(
-            (s) =>
-              `${s.ok ? '✓' : '✗'} ${s.step}  [exit ${s.code ?? '?'}]\n${trimOutput(s.output)}`,
-          )
+          .map((s) => `${s.ok ? '✓' : '✗'} ${s.step}\n${s.output}`.trim())
           .join('\n\n');
-        setOutput(
-          `${body}\n\n${data.hint ?? ''}\n\nmanual fallback:\n  ${data.install_command ?? ''}`.trim(),
-        );
+        append(`${body}\n\n${data.hint ?? ''}\n\nmanual fallback:\n  ${data.install_command ?? ''}`.trim() + '\n');
+        setLastResult({ ok: data.ok === true, code: data.ok ? 0 : 1 });
       }
       await loadBinary();
       await loadDaemon();
     } finally {
+      setRunning(false);
       setBusy(null);
     }
   }
 
+  function stopRun() {
+    abortRef.current?.abort();
+  }
+
   async function saveSchedule() {
-    setSavingSchedule(true);
     setScheduleMsg(null);
+    setScheduleError(null);
+
+    const payload: Record<string, unknown> = {};
+    if (mode === 'times') {
+      const list = cleanTimes(times);
+      if (!list) {
+        const bad = times.find((t) => normalizeTime(t) === null) ?? '';
+        setScheduleError(`"${bad}" is not a 24-hour time (HH:MM).`);
+        return;
+      }
+      if (list.length === 0) {
+        setScheduleError('Add at least one time, or switch to evenly spaced backups.');
+        return;
+      }
+      payload['backup.times'] = list;
+      // Kept in step so switching back to even spacing does not need retyping, and
+      // so a daemon that predates `backup.times` still gets a sane schedule.
+      payload['backup.time'] = list[0];
+      payload['backup.backups_per_day'] = String(list.length);
+    } else {
+      const norm = normalizeTime(time);
+      if (!norm) {
+        setScheduleError(`"${time}" is not a 24-hour time (HH:MM).`);
+        return;
+      }
+      const n = Number(perDay);
+      if (!Number.isFinite(n) || n < 1 || n > 24) {
+        setScheduleError('Backups per day must be between 1 and 24.');
+        return;
+      }
+      payload['backup.times'] = [];
+      payload['backup.time'] = norm;
+      payload['backup.backups_per_day'] = String(Math.floor(n));
+    }
+
+    setSavingSchedule(true);
     try {
       const res = await fetch('/api/schedule', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          values: {
-            'backup.time': time,
-            'backup.backups_per_day': perDay,
-            'world_backup.times': worldTimes
-              .split('\n')
-              .map((s) => s.trim())
-              .filter(Boolean),
-          },
-        }),
+        body: JSON.stringify({ values: payload }),
       });
-      const data = (await res.json()) as { error?: string; updated?: string[] };
-      setScheduleMsg(
-        res.ok ? 'Schedule saved. Restart the daemon to apply.' : data.error ?? 'Save failed',
-      );
+      const data = (await res.json()) as { error?: string };
+      if (!res.ok) {
+        setScheduleError(data.error ?? 'Save failed');
+        return;
+      }
+      await loadStatus();
+      setScheduleMsg('Saved. Restart the daemon to apply.');
     } finally {
       setSavingSchedule(false);
     }
   }
 
   const state = status?.state;
-  const ok = state?.status === 'ok' && !state?.requires_manual_resume;
+  const failed = Boolean(state?.requires_manual_resume) || state?.status === 'failed';
+  const inFlight = state?.status === 'running';
   const nextMs = status?.next_run_at ? new Date(status.next_run_at).getTime() : null;
+
+  // What the daemon will actually run, from the daemon itself when it can say.
+  const daemonSchedule = status?.config.schedule ?? null;
+  const localPreview = mode === 'times' ? times.filter((t) => normalizeTime(t) !== null) : evenSpacing(time, Number(perDay));
+  const scheduleDrifted =
+    daemonSchedule !== null &&
+    localPreview.length > 0 &&
+    [...localPreview].sort().join(',') !== [...daemonSchedule].sort().join(',');
+  const binaryUnderstandsTimes = Array.isArray(status?.config.times);
 
   if (!meLoading && !can('dashboard.view')) {
     return (
@@ -348,6 +513,10 @@ export default function DashboardPage() {
       </div>
     );
   }
+
+  const pageCount = Math.max(1, Math.ceil(runTotal / pageSize));
+  const firstRow = runTotal === 0 ? 0 : page * pageSize + 1;
+  const lastRow = Math.min((page + 1) * pageSize, runTotal);
 
   return (
     <div className="space-y-6">
@@ -378,6 +547,7 @@ export default function DashboardPage() {
             void loadRuns();
             void loadDaemon();
             void loadBinary();
+            void loadSchedule();
           }}
         >
           <RefreshCw className="h-4 w-4" /> Refresh
@@ -398,8 +568,7 @@ export default function DashboardPage() {
               Running <code className="font-mono">{bin.resolved_path ?? bin.binary}</code>
               {bin.file?.mtime
                 ? ` (file dated ${new Date(bin.file.mtime).toLocaleString()})`
-                : ''}
-              {' '}
+                : ''}{' '}
               while the checkout is at {bin.expected.version ?? '?'}
               {bin.expected.commit ? ` (${bin.expected.commit})` : ''}.
             </p>
@@ -435,9 +604,7 @@ export default function DashboardPage() {
           <RefreshCw className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
           <div className="space-y-2">
             <div>
-              <p className="font-medium">
-                The daemon is still running an older backup-mgr
-              </p>
+              <p className="font-medium">The daemon is still running an older backup-mgr</p>
               <p className="text-muted-foreground">
                 {daemon.binary.reason}. A running process keeps the code it started with, so the
                 daemon needs a restart to pick up the new build.
@@ -473,21 +640,30 @@ export default function DashboardPage() {
       )}
 
       {/* Status */}
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-5">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
         <Card>
           <CardHeader className="pb-2">
             <CardDescription>State</CardDescription>
             <CardTitle className="flex items-center gap-2 text-lg">
-              {ok ? (
-                <CheckCircle2 className="h-5 w-5 text-success" />
+              {/*
+                A cross means "something is wrong". Work in progress is not wrong —
+                a run that is currently checking or backing up shows as in progress,
+                and only a failure (or a run waiting on a human) is marked failed.
+              */}
+              {failed ? (
+                <XCircle className="h-5 w-5 shrink-0 text-destructive" />
+              ) : inFlight ? (
+                <Loader2 className="h-5 w-5 shrink-0 animate-spin text-primary" />
               ) : (
-                <XCircle className="h-5 w-5 text-destructive" />
+                <CheckCircle2 className="h-5 w-5 shrink-0 text-success" />
               )}
-              {state?.stage ?? '—'}
+              <span className="truncate">{state?.stage ?? '—'}</span>
             </CardTitle>
           </CardHeader>
           <CardContent className="text-xs text-muted-foreground">
-            <Badge variant={ok ? 'success' : 'destructive'}>{state?.status ?? 'unknown'}</Badge>
+            <Badge variant={failed ? 'destructive' : inFlight ? 'secondary' : 'success'}>
+              {failed ? (state?.status ?? 'failed') : inFlight ? 'in progress' : (state?.status ?? 'ok')}
+            </Badge>
           </CardContent>
         </Card>
 
@@ -498,7 +674,7 @@ export default function DashboardPage() {
               {state?.last_run_at ? new Date(state.last_run_at).toLocaleString() : 'never'}
             </CardTitle>
           </CardHeader>
-          <CardContent className="truncate text-xs text-muted-foreground">
+          <CardContent className="truncate text-xs text-muted-foreground" title={state?.current_backup}>
             {state?.current_backup || '—'}
           </CardContent>
         </Card>
@@ -521,29 +697,57 @@ export default function DashboardPage() {
           <CardHeader className="pb-2">
             <CardDescription>Source</CardDescription>
             <CardTitle className="flex items-center gap-2 text-sm">
-              <HardDriveDownload className="h-4 w-4 text-primary" />
+              <HardDriveDownload className="h-4 w-4 shrink-0 text-primary" />
               {status?.config.compression ?? '—'}
             </CardTitle>
           </CardHeader>
-          <CardContent className="truncate text-xs text-muted-foreground">
+          <CardContent
+            className="truncate text-xs text-muted-foreground"
+            title={status?.config.backup_path}
+          >
             {status?.config.backup_path ?? '—'}
           </CardContent>
         </Card>
 
-        <Card>
+        <Card className="sm:col-span-2 lg:col-span-1">
           <CardHeader className="pb-2">
             <CardDescription>Remotes</CardDescription>
             <CardTitle className="flex items-center gap-2 text-sm">
-              <Cloud className="h-4 w-4 text-primary" />
-              {status?.remotes.length ?? 0}
+              <Cloud className="h-4 w-4 shrink-0 text-primary" />
+              {status?.remotes.length ?? 0} in use
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-1 text-xs text-muted-foreground">
             {status?.remotes.map((r) => (
-              <div key={r.label} className="truncate">
+              <div key={r.label} className="truncate" title={r.label}>
                 {r.label} · keep {r.retention}
               </div>
             ))}
+            {/*
+              A destination that is configured but switched off is the reason a
+              server that "has two remotes" shows one: say so instead of hiding it.
+            */}
+            {secondary?.remote && !secondary.enabled && (
+              <div
+                className="truncate text-muted-foreground/80"
+                title={`${secondary.remote}:${secondary.dir} is configured but storage.secondary.enabled is false`}
+              >
+                {secondary.remote}:{secondary.dir} · off
+              </div>
+            )}
+            {secondary?.enabled && (
+              <div className="truncate" title={`${secondary.remote}:${secondary.dir}`}>
+                {secondary.remote}:{secondary.dir} · keep {secondary.retention}
+              </div>
+            )}
+            {status?.config.upload_to_all && (
+              <div className="text-primary">uploading to every enabled remote</div>
+            )}
+            {secondary?.remote && !secondary.enabled && (
+              <a className="inline-block pt-1 text-primary underline" href="/config">
+                enable it on the Config page
+              </a>
+            )}
           </CardContent>
         </Card>
       </div>
@@ -568,7 +772,7 @@ export default function DashboardPage() {
           </div>
           <div className="flex flex-wrap gap-2">
             <Button
-              onClick={() => void doAction('run', { world, noPtero, force })}
+              onClick={() => void streamAction('run', { world, noPtero, force })}
               disabled={busy !== null || !can('backup.run')}
             >
               {busy === 'run' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
@@ -576,28 +780,28 @@ export default function DashboardPage() {
             </Button>
             <Button
               variant="secondary"
-              onClick={() => void doAction('run', { world, noPtero, dryRun: true })}
+              onClick={() => void streamAction('run', { world, noPtero, dryRun: true }, 'dry-run')}
               disabled={busy !== null || !can('backup.run')}
             >
               <Terminal className="h-4 w-4" /> Dry run
             </Button>
             <Button
               variant="secondary"
-              onClick={() => void doAction('test-compress')}
+              onClick={() => void streamAction('test-compress')}
               disabled={busy !== null || !can('backup.run')}
             >
               Test compression
             </Button>
             <Button
               variant="secondary"
-              onClick={() => void doAction('check')}
+              onClick={() => void streamAction('check')}
               disabled={busy !== null || !can('backup.check')}
             >
               <ShieldCheck className="h-4 w-4" /> Check integrity
             </Button>
             <Button
               variant="secondary"
-              onClick={() => void doAction('restore-list')}
+              onClick={() => void streamAction('restore-list')}
               disabled={busy !== null || !can('backup.restore')}
             >
               List backups
@@ -611,26 +815,55 @@ export default function DashboardPage() {
             </Button>
             <Button
               variant="outline"
-              onClick={() => void doAction('fix-perms')}
+              onClick={() => void streamAction('fix-perms')}
               disabled={busy !== null || !can('backup.fix_perms')}
             >
               <Wrench className="h-4 w-4" /> Fix permissions
             </Button>
             <Button
               variant="outline"
-              onClick={() => void doAction('reset')}
+              onClick={() => void streamAction('reset')}
               disabled={busy !== null || !can('backup.run')}
             >
               Reset state
             </Button>
           </div>
 
-          <Textarea
-            readOnly
-            value={output}
-            placeholder="Action output will appear here…"
-            className="min-h-[160px] font-mono text-xs"
-          />
+          <div className="space-y-2">
+            <div className="flex flex-wrap items-center gap-2">
+              {running && (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                  <span className="text-sm text-muted-foreground">Running…</span>
+                  <Button size="sm" variant="outline" onClick={stopRun}>
+                    <Square className="h-3.5 w-3.5" /> Stop
+                  </Button>
+                </>
+              )}
+              {!running && lastResult && (
+                <Badge variant={lastResult.ok ? 'success' : 'destructive'}>
+                  {lastResult.ok
+                    ? 'SUCCESSFUL'
+                    : `UNSUCCESSFUL${lastResult.code !== null ? ` (exit ${lastResult.code})` : ''}`}
+                </Badge>
+              )}
+            </div>
+            <pre
+              ref={consoleRef}
+              className="h-64 overflow-auto rounded-md border border-input bg-secondary/40 p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap"
+              aria-live="polite"
+            >
+              {output || 'Action output will appear here as it runs…'}
+              {!running && lastResult && (
+                <>
+                  {'\n\n'}
+                  {lastResult.ok
+                    ? 'SUCCESSFUL'
+                    : `UNSUCCESSFUL${lastResult.code !== null ? ` (exit ${lastResult.code})` : ''}`}
+                </>
+              )}
+            </pre>
+          </div>
         </CardContent>
       </Card>
 
@@ -702,51 +935,131 @@ export default function DashboardPage() {
       <Card>
         <CardHeader>
           <CardTitle>Schedule</CardTitle>
-          <CardDescription>
-            When the daemon runs backups. (All other settings are on the Config page.)
-          </CardDescription>
+          <CardDescription>When the daemon runs backups.</CardDescription>
         </CardHeader>
-        <CardContent className="grid gap-5 md:grid-cols-3">
-          <div className="space-y-2">
-            <Label htmlFor="time">First daily backup (HH:MM)</Label>
-            <Input
-              id="time"
-              value={time}
-              onChange={(e) => setTime(e.target.value)}
-              placeholder="03:30"
-              disabled={!can('backup.schedule')}
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="perDay">Backups per day</Label>
-            <Input
-              id="perDay"
-              type="number"
-              min="1"
-              value={perDay}
-              onChange={(e) => setPerDay(e.target.value)}
-              disabled={!can('backup.schedule')}
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="worldTimes">World backup times</Label>
-            <Textarea
-              id="worldTimes"
-              value={worldTimes}
-              onChange={(e) => setWorldTimes(e.target.value)}
-              placeholder={'06:00\n12:00\n18:00'}
-              className="min-h-[76px] font-mono text-xs"
-              disabled={!can('backup.schedule')}
-            />
-          </div>
-          <div className="flex flex-wrap items-center gap-3 md:col-span-3">
+        <CardContent className="space-y-5">
+          <div className="flex flex-wrap gap-2">
             <Button
-              onClick={saveSchedule}
-              disabled={savingSchedule || !can('backup.schedule')}
+              size="sm"
+              variant={mode === 'even' ? 'default' : 'outline'}
+              onClick={() => setMode('even')}
+              disabled={!can('backup.schedule')}
             >
+              Evenly spaced
+            </Button>
+            <Button
+              size="sm"
+              variant={mode === 'times' ? 'default' : 'outline'}
+              onClick={() => setMode('times')}
+              disabled={!can('backup.schedule')}
+            >
+              Specific times
+            </Button>
+          </div>
+
+          {mode === 'even' ? (
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              <div className="space-y-2">
+                <Label htmlFor="time">First daily backup (HH:MM)</Label>
+                <Input
+                  id="time"
+                  value={time}
+                  onChange={(e) => setTime(e.target.value)}
+                  placeholder="03:30"
+                  disabled={!can('backup.schedule')}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="perDay">Backups per day</Label>
+                <Input
+                  id="perDay"
+                  type="number"
+                  min="1"
+                  max="24"
+                  value={perDay}
+                  onChange={(e) => setPerDay(e.target.value)}
+                  disabled={!can('backup.schedule')}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Runs at</Label>
+                <p className="rounded-md border border-border bg-secondary/40 px-3 py-2 font-mono text-xs text-muted-foreground">
+                  {evenSpacing(time, Number(perDay)).join('  ') || '—'}
+                </p>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <Label>Backup times</Label>
+              {times.map((t, i) => (
+                <div key={i} className="flex items-center gap-2">
+                  <Input
+                    value={t}
+                    onChange={(e) =>
+                      setTimes((prev) => prev.map((v, j) => (j === i ? e.target.value : v)))
+                    }
+                    placeholder="03:30"
+                    inputMode="numeric"
+                    className="max-w-[10rem]"
+                    disabled={!can('backup.schedule')}
+                  />
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    aria-label={`Remove backup time ${i + 1}`}
+                    onClick={() => setTimes((prev) => prev.filter((_, j) => j !== i))}
+                    disabled={!can('backup.schedule') || times.length <= 1}
+                  >
+                    <Minus className="h-4 w-4" />
+                  </Button>
+                </div>
+              ))}
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() =>
+                  setTimes((prev) => {
+                    // A sensible next slot: an hour after the last one.
+                    const last = prev.length ? (minuteOf(prev[prev.length - 1]) ?? 210) : 210;
+                    return [...prev, fmtMinute((last + 60) % 1440)];
+                  })
+                }
+                disabled={!can('backup.schedule') || times.length >= 24}
+              >
+                <Plus className="h-4 w-4" /> Add another backup
+              </Button>
+              <p className="text-xs text-muted-foreground">
+                Each entry is one backup a day, at exactly that time.
+              </p>
+            </div>
+          )}
+
+          {daemonSchedule && daemonSchedule.length > 0 && (
+            <p className="text-xs text-muted-foreground">
+              The daemon is scheduling:{' '}
+              <span className="font-mono text-foreground">{daemonSchedule.join('  ')}</span>
+            </p>
+          )}
+          {scheduleDrifted && (
+            <p className="flex items-start gap-2 text-xs text-primary">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              The running daemon is still using the previous times — restart it to apply.
+            </p>
+          )}
+          {mode === 'times' && !binaryUnderstandsTimes && (
+            <p className="flex items-start gap-2 text-xs text-destructive">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              The installed backup-mgr predates per-time schedules, so it ignores these and uses
+              the even-spacing rule instead. Rebuild &amp; reinstall, then restart the daemon.
+            </p>
+          )}
+
+          <div className="flex flex-wrap items-center gap-3">
+            <Button onClick={saveSchedule} disabled={savingSchedule || !can('backup.schedule')}>
               {savingSchedule && <Loader2 className="h-4 w-4 animate-spin" />}
               Save schedule
             </Button>
+            {scheduleError && <span className="text-sm text-destructive">{scheduleError}</span>}
             {scheduleMsg && <span className="text-sm text-muted-foreground">{scheduleMsg}</span>}
           </div>
         </CardContent>
@@ -754,9 +1067,51 @@ export default function DashboardPage() {
 
       {/* History */}
       <Card>
-        <CardHeader>
-          <CardTitle>Recent runs</CardTitle>
-          <CardDescription>Last 25 entries from the history database.</CardDescription>
+        <CardHeader className="flex-row items-start justify-between gap-3 space-y-0">
+          <div>
+            <CardTitle>Recent runs</CardTitle>
+            <CardDescription>
+              {runTotal === 0
+                ? 'Nothing recorded yet.'
+                : `Showing ${firstRow}–${lastRow} of ${runTotal}.`}
+            </CardDescription>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Select
+              value={String(pageSize)}
+              onChange={(e) => {
+                setPageSize(Number(e.target.value));
+                setPage(0);
+              }}
+              className="w-[5.5rem]"
+              aria-label="Runs per page"
+            >
+              {PAGE_SIZES.map((s) => (
+                <option key={s} value={s}>
+                  {s} / page
+                </option>
+              ))}
+            </Select>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setPage((p) => Math.max(0, p - 1))}
+              disabled={page === 0}
+            >
+              <ChevronLeft className="h-4 w-4" /> Prev
+            </Button>
+            <span className="text-xs text-muted-foreground">
+              {page + 1} / {pageCount}
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setPage((p) => (p + 1 < pageCount ? p + 1 : p))}
+              disabled={page + 1 >= pageCount}
+            >
+              Next <ChevronRight className="h-4 w-4" />
+            </Button>
+          </div>
         </CardHeader>
         <CardContent>
           <Table>

@@ -36,9 +36,11 @@ export const CIPHERS = ['AES256', 'AES192', 'AES128'];
 export const SHUTDOWN_SIGNALS = ['stop', 'kill'];
 
 /**
- * Every editable, non-schedule setting. `backup.time`, `backup.backups_per_day`
- * and `world_backup.times` deliberately live on the Dashboard instead, so no
- * option appears on two pages.
+ * Every editable, non-schedule setting. The *daily* schedule keys
+ * (`backup.time`, `backup.backups_per_day`, `backup.times`) deliberately live on
+ * the Dashboard instead, so no option appears on two pages. World-backup times are
+ * a property of the world-backup feature, so they are configured here with the
+ * rest of it.
  */
 export const CONFIG_SECTIONS: Section[] = [
   {
@@ -94,7 +96,7 @@ export const CONFIG_SECTIONS: Section[] = [
   {
     id: 'world',
     title: 'World backups (Minecraft)',
-    description: 'Frequent snapshots of just the world folder. Run times are on the Dashboard.',
+    description: 'Frequent snapshots of just the world folder.',
     fields: [
       { key: 'world_backup.enabled', label: 'Enabled', type: 'boolean' },
       {
@@ -104,6 +106,12 @@ export const CONFIG_SECTIONS: Section[] = [
       },
       { key: 'world_backup.world_folder', label: 'World folder', type: 'string' },
       { key: 'world_backup.prefix', label: 'World archive prefix', type: 'string' },
+      {
+        key: 'world_backup.times',
+        label: 'World backup times',
+        type: 'string[]',
+        help: 'One HH:MM per line, in the timezone above. Empty = no world snapshots.',
+      },
     ],
   },
   {
@@ -242,10 +250,18 @@ export const FIELD_BY_KEY = new Map(CONFIG_FIELDS.map((f) => [f.key, f]));
 export const SCHEDULE_KEYS = new Set([
   'backup.time',
   'backup.backups_per_day',
-  'world_backup.times',
+  // Exact run times. When non-empty it *is* the schedule, and the two keys above
+  // are only the fallback — which is why both live together on the Dashboard.
+  'backup.times',
 ]);
 
 export const SCHEDULE_FIELDS: Field[] = [
+  {
+    key: 'backup.times',
+    label: 'Backup times',
+    type: 'string[]',
+    help: 'Exact daily run times, one per line. Empty = use the even-spacing rule below.',
+  },
   {
     key: 'backup.time',
     label: 'First daily backup (HH:MM)',
@@ -258,13 +274,46 @@ export const SCHEDULE_FIELDS: Field[] = [
     type: 'number',
     help: '1 = once/day; N = N evenly spaced runs starting at the time above.',
   },
-  {
-    key: 'world_backup.times',
-    label: 'World backup times',
-    type: 'string[]',
-    help: 'One HH:MM per line. Requires world backups enabled on the Config page.',
-  },
 ];
+
+/**
+ * Normalise "6:5" / "06:05 " to "06:05", or null when it is not a time.
+ *
+ * The daemon silently drops a time it cannot parse, which would look like "the
+ * schedule saved but nothing runs", so the panel refuses it first.
+ */
+export function normalizeTime(value: unknown): string | null {
+  const text = String(value ?? '').trim();
+  const m = /^(\d{1,2}):(\d{1,2})$/.exec(text);
+  if (!m) return null;
+  const h = Number(m[1]);
+  const min = Number(m[2]);
+  if (h > 23 || min > 59) return null;
+  return `${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}`;
+}
+
+/**
+ * Check one schedule value, returning a message a human can act on.
+ *
+ * Covers the keys whose mistakes the daemon cannot report back: a bad time is
+ * dropped silently there, and the run simply never happens.
+ */
+export function validateScheduleValue(key: string, value: unknown): string | null {
+  if (key === 'backup.time') {
+    return normalizeTime(value) ? null : `'backup.time' must be a 24-hour HH:MM time, got '${String(value)}'`;
+  }
+  if (key === 'backup.times') {
+    const list = Array.isArray(value) ? value : [];
+    for (const entry of list) {
+      if (String(entry).trim() === '') continue;
+      if (!normalizeTime(entry)) {
+        return `'backup.times' entries must be 24-hour HH:MM times, got '${String(entry)}'`;
+      }
+    }
+    return null;
+  }
+  return null;
+}
 
 /** Coerce a form value to the type the YAML file expects. */
 export function coerce(field: Field, value: unknown): unknown {

@@ -16,24 +16,32 @@ export type RunRow = {
   error: string;
 };
 
-/** Read the most recent runs. Returns [] when the DB does not exist yet. */
-export function history(dbPath: string, limit = 50): RunRow[] {
+export type HistoryPage = {
+  runs: RunRow[];
+  /** How many runs exist in total, so the UI can paginate without guessing. */
+  total: number;
+};
+
+/** Read a page of the most recent runs. Empty when the DB does not exist yet. */
+export function history(dbPath: string, limit = 50, offset = 0): HistoryPage {
   let db: Database.Database;
   try {
     db = new Database(dbPath, { readonly: true, fileMustExist: true });
   } catch {
-    return [];
+    return { runs: [], total: 0 };
   }
   try {
     db.pragma('busy_timeout = 3000');
-    return db
+    const runs = db
       .prepare(
         `SELECT id, run_at, kind, name, size_bytes, duration_ms, remote, status, error
-         FROM backups ORDER BY id DESC LIMIT ?`,
+         FROM backups ORDER BY id DESC LIMIT ? OFFSET ?`,
       )
-      .all(limit) as RunRow[];
+      .all(limit, Math.max(offset, 0)) as RunRow[];
+    const { n } = db.prepare('SELECT COUNT(*) AS n FROM backups').get() as { n: number };
+    return { runs, total: n };
   } catch {
-    return [];
+    return { runs: [], total: 0 };
   } finally {
     db.close();
   }
@@ -54,11 +62,12 @@ export async function historyForInstance(
   inst: Instance,
   dbPath: string,
   limit = 50,
-): Promise<RunRow[]> {
+  offset = 0,
+): Promise<HistoryPage> {
   try {
     const st = fs.statSync(dbPath);
     if (st.isFile() && fs.accessSync(dbPath, fs.constants.R_OK) === undefined) {
-      return history(dbPath, limit);
+      return history(dbPath, limit, offset);
     }
   } catch {
     // Not readable as the panel user; fall through to the copy.
@@ -78,8 +87,8 @@ export async function historyForInstance(
       fs.writeFileSync(path.join(tmp, path.basename(src)), bytes, { mode: 0o600 });
       if (src === dbPath) gotMain = true;
     }
-    if (!gotMain) return [];
-    return history(path.join(tmp, 'history.db'), limit);
+    if (!gotMain) return { runs: [], total: 0 };
+    return history(path.join(tmp, 'history.db'), limit, offset);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

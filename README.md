@@ -59,7 +59,7 @@ Key settings (also flagged as **CRITICAL** in the file):
 | `backup.prefix`, `backup.timestamp_format` | Archive naming; changing after first run stops old archives being pruned. |
 | `backup.path`, `backup.dir` | The folder to archive (remote-safe: you need read access) and the local staging dir. |
 | `google_drive.remote` / `dir` | Primary destination. |
-| `backup.time` + `timezone` | When the scheduled backup runs. |
+| `backup.time` + `timezone` | When the scheduled backup runs. For specific times instead of even spacing, set `backup.times: ["03:30", "15:30"]` — the Dashboard provides both. |
 | `encrypt.passphrase`, `pterodactyl.api_key`, `refresh_token`, `discord_webhook` | Secrets live in `config.yml` only. |
 
 You can edit all of this by hand, **or** through the panel's Config tab (which preserves comments).
@@ -156,7 +156,7 @@ For anything public, add TLS: `sudo certbot --nginx -d panel.example.com`.
 
 | Page | Contents |
 |---|---|
-| **Dashboard** `/` | Status cards, next-run countdown, actions (Run / Dry run / Test compression / Check / List / Fix permissions / Reset), guided **Restore** dialog (pick → verify → restore, optional `--force`), schedule editor, **daemon control** (start/stop/restart pm2), run history, and a **binary build badge** that turns red with the exact fix command — plus a one-click **Rebuild & reinstall** button — when the installed `backup-mgr` is out of date. It also warns when the **daemon is still running a binary that has since been replaced**, with a Restart button. |
+| **Dashboard** `/` | Status cards, next-run countdown, actions (Run / Dry run / Test compression / Check / List / Fix permissions / Reset), guided **Restore** dialog (pick → verify → restore, optional `--force`), schedule editor (**evenly spaced, or a list of exact times**), **daemon control** (start/stop/restart pm2), paged run history, and a **binary build badge** that turns red with the exact fix command — plus a one-click **Rebuild & reinstall** button — when the installed `backup-mgr` is out of date. It also warns when the **daemon is still running a binary that has since been replaced**, with a Restart button. Action output streams live and ends in `SUCCESSFUL` / `UNSUCCESSFUL (exit N)`. |
 | **Config** `/config` | Every *non-schedule* `config.yml` value, grouped. Comments preserved, atomic `0600` writes. |
 | **Auth** `/auth` | rclone Google Drive OAuth — plain browser auth **or** your own client ID/secret — plus secondary-remote authorization (a second Drive or Backblaze B2). Works headless via the **paste token** flow, which prints the exact `rclone authorize` command for your config. |
 | **Logs** `/logs` | A **tab per log type** — **Backup** (per-day run logs), **Daemon (pm2)** and **Panel (pm2)** — each with its own file list, a **live SSE tail** and download. |
@@ -355,11 +355,12 @@ Things to be aware of:
 ## 8. Tests
 
 ```bash
-cargo test          # Rust: scheduler DST handling, restore integrity gate  (8 tests)
+cargo test          # Rust: scheduler DST handling, restore integrity gate, schedule rules  (12 tests)
 cd web && npm test  # Panel: account mirroring + reconciliation, Linux password verification
                     # (real crypt(3)), per-user instances and the run-as-user runner, permissions,
                     # sessions, rclone parsing, build-stamp + daemon-staleness logic, log
-                    # sources, and API guards  (175 tests)
+                    # sources, sudo elevation + the audit trail, streaming action output, history
+                    # paging, schedule validation, and API guards  (208 tests)
 ```
 
 ## 9. Troubleshooting

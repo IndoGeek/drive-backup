@@ -1,3 +1,4 @@
+use crate::scheduler;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -52,6 +53,14 @@ pub struct BackupCfg {
     pub time: String,
     #[serde(default = "default_bpd")]
     pub backups_per_day: u32,
+    /// Explicit daily run times ("HH:MM").
+    ///
+    /// Empty (the default) keeps the historical behaviour: `time` plus
+    /// `backups_per_day` evenly-spaced slots anchored at `time`. Set it when the
+    /// runs should happen at specific times rather than at even intervals — two
+    /// entries mean two backups a day at exactly those times.
+    #[serde(default)]
+    pub times: Vec<String>,
     #[serde(default = "default_timestamp_fmt")]
     pub timestamp_format: String,
     #[serde(default)]
@@ -438,6 +447,19 @@ impl Config {
         if self.inner.backup.backups_per_day == 0 {
             self.inner.backup.backups_per_day = 1;
         }
+        // Keep only usable times, sorted and de-duplicated, so the daemon's
+        // schedule and the panel's view of it cannot disagree about "06:00" vs
+        // "6:00 " or run the same slot twice.
+        let mut times: Vec<u32> = self
+            .inner
+            .backup
+            .times
+            .iter()
+            .filter_map(|t| scheduler::parse_time(t))
+            .collect();
+        times.sort_unstable();
+        times.dedup();
+        self.inner.backup.times = times.iter().map(|m| format!("{:02}:{:02}", m / 60, m % 60)).collect();
         if self.inner.backup.max_local_backups == 0 {
             self.inner.backup.max_local_backups = 1;
         }
@@ -485,7 +507,15 @@ backup:
   time: "03:30"
 
   # How many backups to run per day. 1 = once/day. N = N evenly spaced runs/day.
+  # Ignored when "times" below is set.
   backups_per_day: 1
+
+  # Exact daily run times (24h, HH:MM). Empty = use time + backups_per_day.
+  # Set these to run at specific times instead of at even intervals, e.g.:
+  #   times:
+  #     - "03:30"
+  #     - "15:30"
+  times: []
 
   # Archive timestamp format (%Y %y %m %d %H %M %S tokens supported).
   timestamp_format: "%d-%m-%y_%H-%M"

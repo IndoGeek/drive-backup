@@ -39,6 +39,13 @@ backup:
   time: "03:30"
   backups_per_day: 1
 
+  # Exact daily run times (24h HH:MM). Empty = use time + backups_per_day above.
+  # Set these to run at specific times instead of at even intervals:
+  #   times: ["03:30", "15:30"]     # two backups a day, exactly then
+  #   times: ["00:00", "06:00", "12:00", "18:00"]
+  # When set, these are the schedule: time/backups_per_day are ignored.
+  times: []
+
   # CRITICAL - timestamp tokens in archive names. Changing this breaks retention pruning.
   timestamp_format: "%d-%m-%y_%H-%M"
 

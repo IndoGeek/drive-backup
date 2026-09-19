@@ -1,12 +1,35 @@
 import { NextResponse } from 'next/server';
 import { mutateInstanceConfig } from '@/lib/config';
-import { coerce, SCHEDULE_FIELDS, SCHEDULE_KEYS } from '@/lib/schema';
+import {
+  coerce,
+  normalizeTime,
+  SCHEDULE_FIELDS,
+  SCHEDULE_KEYS,
+  validateScheduleValue,
+} from '@/lib/schema';
 import { guard } from '@/lib/auth';
 import { pickInstanceForMutation, requireProvisioned } from '@/lib/routeutil';
 
 export const runtime = 'nodejs';
 
 const SCHEDULE_FIELD_BY_KEY = new Map(SCHEDULE_FIELDS.map((f) => [f.key, f]));
+
+/**
+ * Store times in one canonical form, exactly as the daemon does when it loads the
+ * file. Otherwise "6:5" would be written as typed and shown back unchanged, while
+ * the daemon ran it as 06:05 — the panel and the schedule would disagree on screen.
+ */
+function normalizeScheduleValue(key: string, value: unknown): unknown {
+  if (key === 'backup.time') return normalizeTime(value) ?? value;
+  if (key === 'backup.times') {
+    const list = Array.isArray(value) ? value : [];
+    const times = list
+      .map((entry) => normalizeTime(entry))
+      .filter((t): t is string => t !== null);
+    return [...new Set(times)].sort();
+  }
+  return value;
+}
 
 export async function PUT(req: Request) {
   const g = guard(req, 'backup.schedule');
@@ -35,9 +58,11 @@ export async function PUT(req: Request) {
     if (!field || !SCHEDULE_KEYS.has(key)) {
       return NextResponse.json({ error: `not a schedule key: ${key}` }, { status: 400 });
     }
+    const invalid = validateScheduleValue(key, value);
+    if (invalid) return NextResponse.json({ error: invalid }, { status: 400 });
     const coerced = coerce(field, value);
     if (coerced === undefined) continue;
-    updates.push([key, coerced]);
+    updates.push([key, normalizeScheduleValue(key, coerced)]);
   }
 
   try {

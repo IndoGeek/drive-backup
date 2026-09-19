@@ -19,6 +19,7 @@ export async function GET(req: Request) {
 
   const url = new URL(req.url);
   const limit = Math.min(Math.max(Number(url.searchParams.get('limit') ?? 50), 1), 500);
+  const offset = Math.max(Number(url.searchParams.get('offset') ?? 0) || 0, 0);
 
   let dbPath: string;
   try {
@@ -32,8 +33,14 @@ export async function GET(req: Request) {
     );
   }
 
+  const page = await historyForInstance(inst, dbPath, limit, offset);
   return NextResponse.json({
-    runs: await historyForInstance(inst, dbPath, limit),
+    runs: page.runs,
+    // Paging needs a total; the panel must not have to guess whether another
+    // page exists from a short page alone.
+    total: page.total,
+    limit,
+    offset,
     database: dbPath,
     instance: instanceView(inst),
   });

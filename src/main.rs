@@ -669,8 +669,32 @@ fn parse_minute(s: &str) -> Option<u32> {
     scheduler::parse_time(s)
 }
 
+/// When the daily (full) backups run.
+///
+/// `backup.times` wins when it is set — those are exact wall-clock times, which is
+/// what "two backups a day at 03:30 and 15:30" means. Otherwise the historical
+/// rule applies: `backups_per_day` slots evenly spaced from `backup.time`.
 fn full_minutes(cfg: &Config) -> Vec<u32> {
-    scheduler::schedule_minutes(&cfg.inner.backup.time, cfg.inner.backup.backups_per_day)
+    schedule_for(
+        &cfg.inner.backup.times,
+        &cfg.inner.backup.time,
+        cfg.inner.backup.backups_per_day,
+    )
+}
+
+/// The daily run times, given the two ways of describing them.
+fn schedule_for(times: &[String], time: &str, per_day: u32) -> Vec<u32> {
+    let explicit: Vec<u32> = times
+        .iter()
+        .filter_map(|t| scheduler::parse_time(t))
+        .collect();
+    if !explicit.is_empty() {
+        let mut v = explicit;
+        v.sort_unstable();
+        v.dedup();
+        return v;
+    }
+    scheduler::schedule_minutes(time, per_day)
 }
 
 fn world_minutes(cfg: &Config) -> Vec<u32> {
@@ -907,6 +931,10 @@ fn cmd_status_json(cfg: &Config) -> Result<(), String> {
             "compression": b.compression,
             "time": b.time,
             "backups_per_day": b.backups_per_day,
+            // The exact times this build will run at, so the panel can show what
+            // the daemon really does rather than only what config.yml says.
+            "times": b.times,
+            "schedule": full_minutes(cfg).iter().map(|&m| fmt_minute(m)).collect::<Vec<_>>(),
             "timezone": cfg.inner.timezone,
             "encrypt_enabled": cfg.inner.encrypt.enabled,
             "upload_to_all": cfg.inner.storage.upload_to_all,
@@ -1532,7 +1560,41 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::restore_hash_gate;
+    use super::{restore_hash_gate, schedule_for};
+
+    #[test]
+    fn schedule_without_times_keeps_the_even_spacing_rule() {
+        // Unchanged behaviour: per_day slots anchored at `time`.
+        assert_eq!(schedule_for(&[], "03:30", 1), vec![210]);
+        assert_eq!(schedule_for(&[], "03:30", 2), vec![210, 930]);
+        assert_eq!(schedule_for(&[], "03:30", 4), vec![210, 570, 930, 1290]);
+    }
+
+    #[test]
+    fn explicit_times_are_the_schedule() {
+        let times = vec!["15:30".to_string(), "03:30".to_string()];
+        // Sorted, so the daemon's log and the panel agree.
+        assert_eq!(schedule_for(&times, "03:30", 1), vec![210, 930]);
+    }
+
+    #[test]
+    fn explicit_times_dedupe_and_ignore_unparseable_entries() {
+        let times = vec![
+            "06:00".to_string(),
+            "06:00".to_string(),
+            "6:00".to_string(),
+            "25:00".to_string(),
+            "not a time".to_string(),
+        ];
+        assert_eq!(schedule_for(&times, "03:30", 3), vec![360]);
+    }
+
+    #[test]
+    fn times_that_are_all_invalid_fall_back_rather_than_run_nothing() {
+        let times = vec!["nope".to_string()];
+        assert_eq!(schedule_for(&times, "03:30", 2), vec![210, 930]);
+    }
+
 
     #[test]
     fn restore_gate_passes_on_matching_hash() {

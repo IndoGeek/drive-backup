@@ -47,7 +47,7 @@ is an administrator, and root always is. There is no default login and no admin 
 
 | Page | Purpose |
 |---|---|
-| **Dashboard** (`/`) | Status cards, a **countdown to the next scheduled run**, manual backup / dry run / test compression / integrity check, **fix permissions**, reset state, a guided **Restore dialog** (pick a backup → verify → restore, with an optional `--force`), **daemon control** (start / stop / restart the pm2 service), the **schedule** (run time, backups per day, world times), recent run history, a **binary build badge** with a one-click **Rebuild & reinstall** button (see [Binary version](#binary-version)), and a banner when the daemon is still running a since-replaced binary. |
+| **Dashboard** (`/`) | Status cards, a **countdown to the next scheduled run**, manual backup / dry run / test compression / integrity check, **fix permissions**, reset state, a guided **Restore dialog** (pick a backup → verify → restore, with an optional `--force`), **daemon control** (start / stop / restart the pm2 service), the **schedule** (evenly spaced, or a list of exact times — see [Scheduling](#scheduling)), paged run history, a **binary build badge** with a one-click **Rebuild & reinstall** button (see [Binary version](#binary-version)), and a banner when the daemon is still running a since-replaced binary. Action output **streams live** and ends with `SUCCESSFUL` / `UNSUCCESSFUL (exit N)`. |
 | **Config** (`/config`) | Every *non-schedule* `config.yml` value, grouped by section. Edits preserve comments and are written atomically with `0600` permissions. |
 | **Auth** (`/auth`) | Authorize the **primary** remote or the **secondary** (redundancy) remote. Drive remotes support **both** rclone methods — plain browser auth (just your Google account) or your own client ID/secret; non-Drive remotes (e.g. **Backblaze B2**) are configured with account + key. On a headless VPS use the **paste token** method. Drive tokens are written to `google_drive` / `storage.secondary` in `config.yml`; B2 credentials are stored by rclone itself. |
 | **Logs** (`/logs`) | **One tab per kind of log**, each with its own file list, **live tail** (Server-Sent Events) and download: **Backup** (per-day run logs from `logging.dir`), **Daemon (pm2)** (`logs/pm2.log`, `logs/pm2-error.log`) and **Panel (pm2)** (`web/logs/pm2-web*.log`). The newest file in a tab is selected automatically, and error logs are badged. |
@@ -176,6 +176,30 @@ Failed sign-ins are throttled per account+address with an exponential lockout (s
 it resets on restart), and every reply takes at least ~350ms so timing cannot reveal whether a username
 exists. Locked (`!`) and password-less (`*`) accounts are reported distinctly to an administrator but
 vaguely to the client.
+
+## Scheduling
+
+The Dashboard owns when backups run; the Config page owns everything else about them. Two modes,
+and the file stores them in different keys:
+
+| Mode | What you set | `config.yml` |
+| --- | --- | --- |
+| **Evenly spaced** | A first time and a count — `03:30`, 4 a day | `backup.time: "03:30"`, `backup.backups_per_day: 4` |
+| **Specific times** | A list of exact times, with **+ Add another backup** | `backup.times: ["03:30", "09:30", "15:30", "21:30"]` |
+
+`backup.times` wins when it is non-empty; `backup.time` + `backup.backups_per_day` remain the fallback
+(and are kept in step when you save a list, so switching modes does not lose them). Both are validated
+before saving — `25:00` or `half past three` is refused with a message rather than written and silently
+ignored by the daemon, which is what a bad time would otherwise look like: *"the schedule saved but
+nothing runs"*.
+
+The Dashboard shows **the schedule the daemon itself reports** (`config.schedule` from
+`status --json`), so a saved change that has not been applied yet is visible as a difference rather
+than a surprise. It also warns when the installed binary predates per-time schedules — those were
+added in the same change, so an older build ignores `backup.times` and keeps using even spacing.
+
+**World-backup times live on the Config page**, next to the rest of the world-backup settings, because
+they are a property of that feature rather than a second schedule. Nothing appears on two pages.
 
 ## Binary version
 
