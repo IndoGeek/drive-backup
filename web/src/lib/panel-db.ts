@@ -4,16 +4,6 @@ import path from 'node:path';
 import { dataDir } from './panel';
 import { osUserSource } from './osusers';
 
-/**
- * The panel's own SQLite store: authorization (`panel_users`) and the audit trail
- * (`audit_log`). It lives in its own module so that both ./users.ts and ./audit.ts
- * can use it without importing each other.
- *
- * The filename stays `users.db` deliberately: an existing deployment's legacy
- * database lives there, and `migrateLegacyAuth` below needs to find it to carry
- * permissions over and drop the obsolete password hashes.
- */
-
 export function dbPath(): string {
   return process.env.BACKUP_MGR_USERS_DB || path.join(dataDir(), 'users.db');
 }
@@ -55,22 +45,13 @@ export function db(): Database.Database {
   `);
   migrateLegacyAuth(d);
   try {
-    // Holds the admin list, permission grants and the audit trail; keep it owner-only.
     fs.chmodSync(dbPath(), 0o600);
   } catch {
-    // best effort (e.g. a filesystem without POSIX modes)
   }
   _db = d;
   return d;
 }
 
-/**
- * Carry permissions over from the pre-multi-user schema, then drop it.
- *
- * The old table stored scrypt password hashes that are now meaningless — Linux
- * owns authentication — so removing it is both a migration and a cleanup. Only
- * rows whose username is still a real account are kept.
- */
 function migrateLegacyAuth(d: Database.Database): void {
   const legacy = d
     .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name = 'users'")

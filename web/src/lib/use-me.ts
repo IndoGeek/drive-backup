@@ -5,17 +5,14 @@ import type { Permission } from './permissions';
 
 export type Me = {
   id: number;
-  /** The Linux account name — the identity, and the key to the user's instance. */
+
   username: string;
   is_admin: boolean;
   permissions: Permission[];
   enabled: boolean;
-  /** The Linux account this panel user mirrors no longer exists. */
+
   orphaned: boolean;
-  /**
-   * Privileges as the OS defines them: admin follows sudo, and an elevation grant
-   * says whether a sudo password has already been accepted for this login.
-   */
+
   sudo?: {
     has_sudo: boolean;
     passwordless: boolean | null;

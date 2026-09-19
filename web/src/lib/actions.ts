@@ -5,15 +5,6 @@ import { binaryPath } from './panel';
 import type { Instance } from './instance';
 import type { Permission } from './permissions';
 
-/**
- * The actions the Dashboard can run, in one place.
- *
- * Both routes that run them share this — `/api/actions` collects the output and
- * returns it in one piece, `/api/actions/stream` streams it as it happens — so the
- * two can never disagree about what an action means, which permission it needs,
- * or how long it may take.
- */
-
 export type ActionOptions = {
   world?: boolean;
   noPtero?: boolean;
@@ -24,7 +15,6 @@ export type ActionOptions = {
   target?: string;
 };
 
-/** Actions whose arguments come straight from a lookup — no flags to build. */
 const SIMPLE: Record<string, string[]> = {
   'test-compress': ['test-compress'],
   'restore-list': ['restore'],
@@ -78,7 +68,6 @@ export function permissionFor(action: string): Permission {
   }
 }
 
-/** A full backup of a large source can take a long time; checks and lists do not. */
 export function timeoutFor(action: string): number {
   return action === 'run' ? 1000 * 60 * 60 * 2 : 1000 * 60 * 30;
 }
@@ -87,13 +76,6 @@ export type Prepared =
   | { ok: true; inst: Instance; args: string[]; command: string; timeout: number }
   | { ok: false; response: NextResponse };
 
-/**
- * Authenticate, authorize, resolve the instance and translate the action into an
- * argv — everything a caller must do before running anything.
- *
- * The `--config` flag is added here so a streamed command is complete: the caller
- * sees the exact line that ran, and it can be pasted into a shell to reproduce.
- */
 export async function prepareAction(
   req: Request,
   body: { action?: string; options?: ActionOptions } | null,

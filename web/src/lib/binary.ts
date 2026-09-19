@@ -3,10 +3,8 @@ import { existsSync, readlinkSync, statSync, type Stats } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-/** Where a freshly built binary should be installed by default. */
 export const DEFAULT_INSTALL_TARGET = '/usr/local/bin/backup-mgr';
 
-/** Resolve `bin` to an absolute path the same way a shell would. */
 export function resolveBinaryPath(bin: string): string | null {
   const candidates = bin.includes('/')
     ? [bin]
@@ -18,17 +16,11 @@ export function resolveBinaryPath(bin: string): string | null {
     try {
       if (statSync(candidate).isFile()) return candidate;
     } catch {
-      // keep looking
     }
   }
   return null;
 }
 
-/**
- * Where the freshly built binary should be installed. Running the build output
- * directly (`BACKUP_MGR_BIN=target/release/backup-mgr`) must not suggest copying
- * the file onto itself — the useful target is still the PATH location.
- */
 export function installTarget(root: string, resolvedPath: string | null): string {
   if (!resolvedPath) return DEFAULT_INSTALL_TARGET;
   const buildTree = path.join(root, 'target');
@@ -38,10 +30,6 @@ export function installTarget(root: string, resolvedPath: string | null): string
   return resolvedPath;
 }
 
-/**
- * Locate cargo. A panel started by pm2/systemd does not inherit an interactive
- * shell's PATH, so rustup's per-user install is checked explicitly.
- */
 export function resolveCargo(env: Partial<NodeJS.ProcessEnv> = process.env): string {
   if (env.CARGO_BIN) return env.CARGO_BIN;
   const home = env.HOME || os.homedir();
@@ -52,7 +40,6 @@ export function resolveCargo(env: Partial<NodeJS.ProcessEnv> = process.env): str
   return 'cargo';
 }
 
-/** The command a human would run; shown in the UI as a manual fallback. */
 export function installCommandText(target: string): string {
   return `cargo build --release && sudo install -m 0755 target/release/backup-mgr ${target}`;
 }
@@ -66,19 +53,13 @@ function statOrNull(p: string): Stats | null {
 }
 
 export type RunningBinary = {
-  /** Path the process was started from; Linux appends " (deleted)" once replaced. */
   exe_path: string;
-  /** True when the file this process runs no longer exists on disk. */
+
   deleted: boolean;
   dev: number;
   ino: number;
 };
 
-/**
- * Inspect what a running process actually has open, via /proc (Linux only).
- * `statSync` follows the symlink, so it reports the *running* inode even after
- * the file has been unlinked by an install.
- */
 export function runningBinary(pid: number | undefined): RunningBinary | null {
   if (!pid || !Number.isInteger(pid) || pid <= 0) return null;
   const link = `/proc/${pid}/exe`;
@@ -105,14 +86,6 @@ export type DaemonBinaryCheck = {
   disk_path: string | null;
 };
 
-/**
- * Decide whether the daemon process is running something older than the binary
- * on disk, and therefore needs a restart to pick up a new build.
- *
- * Deliberately conservative: paths that simply *differ* are not flagged, because
- * `BACKUP_MGR_BIN` may point at the build tree while the daemon runs an
- * installed copy. Only a replaced file is reported.
- */
 export function compareRunningBinary(
   running: RunningBinary | null,
   disk: { path: string; dev: number; ino: number } | null,
@@ -137,7 +110,6 @@ export function compareRunningBinary(
   return { ...base, restart_needed: false, reason: null };
 }
 
-/** Compare the running daemon (by pid) against the binary on disk. */
 export function daemonBinaryCheck(pid: number | undefined, bin: string): DaemonBinaryCheck {
   const diskPath = resolveBinaryPath(bin);
   const st = diskPath ? statOrNull(diskPath) : null;
@@ -172,28 +144,15 @@ function run(
   });
 }
 
-/**
- * The argument list `install` needs to write `source` over `target`.
- *
- * Exactly one source and one target, and deliberately *not* including the command
- * name: the caller passes 'install' as the program. Repeating it makes install
- * read two sources, and it then insists the target be a directory.
- */
 export function installArgs(source: string, target: string): string[] {
   return ['-m', '0755', source, target];
 }
 
-/**
- * The install half of a rebuild, supplied by the caller because it is privileged:
- * the panel runs it under the *acting user's* sudo (see lib/sudo.ts), which is
- * what makes NOPASSWD silent and a password prompt possible.
- */
 export type InstallRunner = (
   target: string,
   root: string,
 ) => Promise<{ code: number | null; output: string; step: string }>;
 
-/** Default runner: the old behaviour, for callers with no user context (tests). */
 export const defaultInstallRunner: InstallRunner = async (target, root) => {
   const install = await run(
     'sudo',
@@ -208,11 +167,6 @@ export const defaultInstallRunner: InstallRunner = async (target, root) => {
   };
 };
 
-/**
- * Rebuild from the served checkout and install over `target`. Run as two
- * attributable steps so a compile failure is distinguishable from a permission
- * problem on the install.
- */
 export async function rebuildAndInstall(
   root: string,
   target: string,

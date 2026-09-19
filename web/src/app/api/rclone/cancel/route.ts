@@ -20,7 +20,5 @@ export async function POST(req: Request) {
   const picked = await pickInstanceForMutation(req, g.user, body);
   const owner = picked.ok ? picked.inst.osUser : g.user.username;
 
-  // Another user's id is reported as unknown rather than forbidden, so job ids
-  // cannot be probed for existence.
   return NextResponse.json({ ok: cancelAuth(body.id, owner) });
 }

@@ -12,28 +12,24 @@ import { currentAccount, makeHash, usePasswdFixture, writeShadowFixture } from '
 const ACCOUNT = currentAccount();
 const PASSWORD = 'correct-horse-battery';
 
-/** Bob is a normal mirrored account; svc is a service account and not mirrorable. */
 const PASSWD = [
   { name: ACCOUNT.name, uid: ACCOUNT.uid, gid: ACCOUNT.gid, home: ACCOUNT.home },
   { name: 'bob', uid: 1001, gid: 1001, home: '/home/bob' },
-  // Locked and password-less accounts are still real, mirrorable accounts — the
-  // shadow entry is what makes them unusable, not the passwd entry.
+
   { name: 'locked', uid: 1003, gid: 1003, home: '/home/locked' },
   { name: 'nopass', uid: 1004, gid: 1004, home: '/home/nopass' },
   { name: 'svc', uid: 1002, gid: 1002, home: '/srv/svc', shell: '/usr/sbin/nologin' },
 ];
 
 beforeEach(() => {
-  // The 350ms floor keeps reply times uniform in production; tests do not need it.
   process.env.BACKUP_MGR_MIN_VERIFY_MS = '0';
   delete process.env.BACKUP_MGR_MAX_LOGIN_FAILURES;
   usePasswdFixture(PASSWD);
   process.env.BACKUP_MGR_SHADOW_FILE = writeShadowFixture([
-    // A genuine crypt(3) hash, so the perl/python crypt path is really exercised.
     { name: 'bob', hash: makeHash(PASSWORD) },
-    // Locked with `passwd -l` (hash prefixed with !).
+
     { name: 'locked', hash: `!${makeHash('whatever')}` },
-    // `*` means no password was ever set.
+
     { name: 'nopass', hash: '*' },
   ]);
 });
@@ -54,7 +50,6 @@ describe('verifySystemPassword', () => {
   });
 
   it('reports an unknown account identically to a wrong password', async () => {
-    // Same reason, so the endpoint cannot be used to enumerate usernames.
     const res = await verifySystemPassword('nobody-here', 'x');
     expect(res.ok).toBe(false);
     if (!res.ok) expect(res.reason).toBe('unknown-user');
@@ -85,8 +80,6 @@ describe('verifySystemPassword', () => {
   });
 
   it('reports a broken shadow source as an infrastructure problem, not a bad password', async () => {
-    // A misconfigured source must not look like "wrong password", which would
-    // send an operator hunting for the wrong bug.
     process.env.BACKUP_MGR_SHADOW_FILE = '/definitely/not/here/shadow';
     const res = await verifySystemPassword('bob', PASSWORD);
     expect(res.ok).toBe(false);

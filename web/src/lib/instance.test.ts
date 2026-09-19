@@ -34,10 +34,9 @@ describe('instanceFor', () => {
     const { account, home } = useSoloInstance();
     const inst = instanceFor(account.name);
     expect(inst?.pm2Name).toBe(`backup-mgr-${account.name}`);
-    // A separate PM2_HOME is what makes the daemon per-user rather than shared.
+
     expect(inst?.pm2Home).toBe(path.join(home, '.pm2'));
-    // ...and a separate rclone config keeps one user's remote credentials out of
-    // another user's reach.
+
     expect(inst?.rcloneConfig).toBe(path.join(home, '.config', 'rclone', 'rclone.conf'));
   });
 
@@ -50,7 +49,7 @@ describe('instanceFor', () => {
 
   it('lets a specific account keep a non-default location (the migration path)', () => {
     const { account } = useSoloInstance();
-    // useSoloInstance() has already pointed this at the current sandbox.
+
     const file = instancesFile();
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(
@@ -60,8 +59,7 @@ describe('instanceFor', () => {
     resetInstanceOverrides();
 
     const inst = instanceFor(account.name);
-    // This is what keeps a pre-existing deployment working after the migration:
-    // its checkout, and its already-running pm2 app name, are preserved.
+
     expect(inst?.root).toBe('/opt/existing-deployment');
     expect(inst?.pm2Name).toBe('backup-mgr');
   });
@@ -87,7 +85,7 @@ describe('runAs', () => {
     process.env.A_PANEL_SECRET = 'leak-me';
     const inst = instanceFor(account.name)!;
     const res = await runAs(inst, 'sh', ['-c', 'echo "[$A_PANEL_SECRET]"']);
-    // The child gets a fixed, minimal environment — never process.env.
+
     expect(res.stdout.trim()).toBe('[]');
     delete process.env.A_PANEL_SECRET;
     expect(inst.home).toBe(home);
@@ -139,7 +137,7 @@ describe('file access as the owning user', () => {
     const files = await listFilesAs(inst, inst.logsDir);
     const byName = Object.fromEntries(files.map((f) => [f.name, f]));
     expect(byName['a.log'].size).toBe(3);
-    // A space in the filename must survive the NUL-separated protocol.
+
     expect(byName['b b.log'].size).toBe(2);
     expect(files.every((f) => !Number.isNaN(Date.parse(f.mtime)))).toBe(true);
   });
@@ -157,7 +155,6 @@ describe('provision', () => {
     expect(fs.existsSync(inst.logsDir)).toBe(true);
     expect(fs.existsSync(inst.backupDir)).toBe(true);
     if (process.platform !== 'win32') {
-      // It holds a gpg passphrase and an OAuth token.
       expect(fs.statSync(inst.configPath).mode & 0o777).toBe(0o600);
     }
   });
@@ -180,7 +177,7 @@ describe('provision', () => {
     const text = ecosystemFor(inst);
     expect(text).toContain(`daemon --config ' + path.join(ROOT, 'config.yml')`);
     expect(text).toContain(inst.pm2Name);
-    // Log capture must live inside the instance, not in a shared directory.
+
     expect(text).toContain(`path.join(ROOT, 'logs', 'pm2.log')`);
     expect(text).not.toContain(account.home + '/backup-mgr/logs/pm2.log');
   });

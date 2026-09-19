@@ -145,9 +145,6 @@ fn build_embed(ev: &Event, ctx: &NotifCtx) -> Embed {
     }
 }
 
-/// Send a Discord embed. Blocks until the request completes so a notification is
-/// never lost when the process exits right after a run, but swallows all errors
-/// so it never fails the caller.
 pub fn send(cfg_webhook: &str, logger: &Logger, ctx: &NotifCtx, ev: &Event) {
     let webhook = cfg_webhook.trim();
     if webhook.is_empty() {

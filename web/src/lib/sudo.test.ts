@@ -3,13 +3,6 @@ import path from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import type { User } from './users';
 
-/**
- * Sudo is the source of truth for admin and for privileged work, so these tests
- * control it explicitly (a fixture, a shadow fixture) and then check the parts that
- * matter: who counts as an administrator, when a password is asked for, how long a
- * grant lives, and that a grant belongs to exactly one login.
- */
-
 const PASSWORD = 'unit-sudo-pass-123';
 let meName = '';
 let me: User;
@@ -51,7 +44,6 @@ beforeAll(async () => {
   mailbox.elevated_until = undefined;
 });
 
-/** A request carrying its own session cookie, so grants cannot leak between tests. */
 function request(label: string): Request {
   return new Request('http://test/api/sudo', {
     headers: { cookie: `bm_session=${label}` },
@@ -79,8 +71,6 @@ describe('sudo capability (who is an administrator)', () => {
     try {
       expect(sudoCapability('nosudo')).toMatchObject({ has_sudo: true, source: 'assumed' });
     } finally {
-      // Must be cleared, not just restored: leaving it set would make 'nosudo' an
-      // administrator for every test that follows.
       if (original === undefined) delete process.env.BACKUP_MGR_ADMIN_USER;
       else process.env.BACKUP_MGR_ADMIN_USER = original;
       const { useSudoFixture } = await import('./testhelp');
@@ -99,8 +89,7 @@ describe('sudo capability (who is an administrator)', () => {
     try {
       const cap = sudoCapability(meName);
       expect(typeof cap.has_sudo).toBe('boolean');
-      // A host where sudo answers, or where groups had to be consulted, or only
-      // where neither worked — all three are legitimate outcomes.
+
       expect(['sudo', 'group', 'unknown']).toContain(cap.source);
     } finally {
       useSudoFixture({
@@ -157,7 +146,7 @@ describe('the elevation grant', () => {
   it('clears the way for privileged work while it lasts', async () => {
     const { authorizePrivileged } = await import('./sudo');
     expect(mailbox.elevated_until).toBeDefined();
-    // Same session as above: no second prompt.
+
     expect(await authorizePrivileged(request('grant-session'), me, 'manage users')).toBeNull();
   });
 
@@ -170,7 +159,7 @@ describe('the elevation grant', () => {
   it('lapses again once the timeout is up', async () => {
     const { authorizeSudo, authorizePrivileged, sudoStatus, resetSudoCache } = await import('./sudo');
     const original = process.env.BACKUP_MGR_SUDO_TIMEOUT_MS;
-    // A zero-length window stands in for "the timeout has passed".
+
     process.env.BACKUP_MGR_SUDO_TIMEOUT_MS = '0';
     try {
       const req = request('expiry-session');
@@ -206,14 +195,11 @@ describe('running a command under that account’s own sudo', () => {
   it('runs passwordlessly where the host allows it, and reports output', async () => {
     const { clearSudoFixture, useSudoFixture, currentAccount } = await import('./testhelp');
     const { probePasswordless, resetSudoCache, runElevated } = await import('./sudo');
-    // Use the real probe here: the declared fixture answers cannot conjure a
-    // working sudoers rule.
+
     clearSudoFixture();
     resetSudoCache();
     try {
       if (!(await probePasswordless(currentAccount().name))) {
-        // A host without passwordless sudo cannot run this without a password; the
-        // gating tests above cover what the panel does there instead.
         return;
       }
       const res = await runElevated(request('runner-session'), currentAccount().name, 'echo', [
@@ -242,9 +228,7 @@ describe('running a command under that account’s own sudo', () => {
       if (!(await probePasswordless(currentAccount().name))) return;
       const dir = tmpDir('bm-runner-cwd-');
       fs.writeFileSync(path.join(dir, 'relative.txt'), 'found it');
-      // The install step passes a relative source path precisely like this, so if
-      // the cwd were dropped the command would look in the panel's directory and
-      // fail — the bug that made a NOPASSWD host ask for a password.
+
       const res = await runElevated(request('cwd-session'), currentAccount().name, 'cat', [
         'relative.txt',
       ], { cwd: dir });
@@ -266,7 +250,7 @@ describe('running a command under that account’s own sudo', () => {
     resetSudoCache();
     try {
       if (!(await probePasswordless(currentAccount().name))) return;
-      // `['echo', 'sudo-ok']` for bin 'echo' would otherwise run `echo echo sudo-ok`.
+
       const res = await runElevated(request('repeat-session'), currentAccount().name, 'echo', [
         'echo',
         'deduped',
@@ -288,16 +272,12 @@ describe('running a command under that account’s own sudo', () => {
     clearSudoFixture();
     resetSudoCache();
     try {
-      // Only meaningful where sudo runs without asking; elsewhere sudo really is
-      // the thing that refused, which the gating tests above cover.
       if (!(await probePasswordless(currentAccount().name))) return;
       const res = await runElevated(request('runner-fail'), currentAccount().name, 'cat', [
         'no-such-file-on-this-host',
       ]);
       expect(res.ok).toBe(false);
       if (!res.ok) {
-        // Asking for a sudo password here would be useless — sudo was never the
-        // problem — and on a NOPASSWD host it is exactly what the user reported.
         expect(res.needs_password).toBe(false);
         if (!res.needs_password) expect(res.error).toMatch(/no such file/i);
       }

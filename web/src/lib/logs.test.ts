@@ -18,7 +18,7 @@ let inst: Instance;
 beforeAll(() => {
   const { account, root } = useSoloInstance();
   inst = instanceFor(account.name)!;
-  // writeFileAs shells out, so the parent directories must already exist.
+
   fs.mkdirSync(inst.logsDir, { recursive: true });
   expect(root).toBe(inst.root);
 });
@@ -34,18 +34,16 @@ describe('logSourceDefs', () => {
 
   it('routes each source through the right access mode', () => {
     const [backup, daemon, panel] = defs();
-    // Backup and daemon logs belong to the user, so they need that identity.
+
     expect(backup.access).toBe('instance');
     expect(daemon.access).toBe('instance');
     expect(daemon.dir).toBe(inst.logsDir);
-    // The panel's own logs are the panel's to read.
+
     expect(panel.access).toBe('panel');
     expect(panel.dir).toBe(path.join(panelDir(), 'logs'));
   });
 
   it('keeps the pm2 logs out of the backup tab', () => {
-    // The backup logs and the daemon's pm2 capture share one directory, so
-    // filename filtering is the only thing separating them.
     const [backup, daemon, panel] = defs();
 
     expect(backup.match('backup_2026-09-19.log')).toBe(true);
@@ -82,7 +80,7 @@ describe('listLogSources', () => {
 
     const views = await listLogSources(inst, defs());
     const byId = Object.fromEntries(views.map((v) => [v.id, v.files.map((f) => f.name)]));
-    // The invariant is the filename filter, not the exact directory contents.
+
     expect(byId.backup).toContain('backup_2026-09-19.log');
     expect(byId.backup).not.toContain('pm2-error.log');
     expect(byId.daemon).toEqual(['pm2-error.log']);
@@ -108,14 +106,14 @@ describe('readLog', () => {
     const file = 'big.log';
     await writeFileAs(inst, path.join(inst.logsDir, file), `${'x'.repeat(5000)}END`, '600');
     const content = await readLog(inst, defs()[0], file, 10);
-    // Exactly the last 10 bytes: 7 x's plus END.
+
     expect(content).toBe(`${'x'.repeat(7)}END`);
     expect(content).toHaveLength(10);
   });
 
   it('contains path traversal to the log directory', async () => {
     const content = await readLog(inst, defs()[0], '../../etc/passwd');
-    // basename() reduces that to the directory's own 'passwd', which does not exist.
+
     expect(content).toBeNull();
   });
 

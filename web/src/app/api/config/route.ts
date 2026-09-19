@@ -61,8 +61,6 @@ export async function PUT(req: Request) {
   }
 
   try {
-    // Written as the owning user, atomically, mode 0600 — the panel itself has no
-    // write access to another user's config.yml.
     await mutateInstanceConfig(inst, (doc) => {
       for (const [key, value] of updates) doc.setIn(key.split('.'), value);
     });

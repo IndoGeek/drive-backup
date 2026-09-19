@@ -12,19 +12,8 @@ import {
 import { KeyRound, Loader2, ShieldCheck } from 'lucide-react';
 import { Button, Input, Label } from '@/components/ui';
 
-/**
- * The sudo prompt, client side.
- *
- * Privileged routes answer `428 { sudo_required }` when the acting account's sudo
- * would ask for a password. One dialog lives here (mounted by the layout), and
- * `fetchElevated` turns that into: ask → POST /api/sudo → retry once. When the
- * account's sudo is NOPASSWD the route never answers 428, so nothing is ever asked
- * — the OS decides, not the panel.
- */
-
 type Pending = { action: string; resolve: (ok: boolean) => void };
 
-/** What `/api/sudo` reports about the signed-in account. */
 export type SudoState = {
   has_sudo: boolean;
   passwordless: boolean | null;
@@ -34,15 +23,14 @@ export type SudoState = {
 };
 
 type ElevationContext = {
-  /** fetch, but with the sudo prompt handled: ask once, then retry. */
   fetchElevated: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
-  /** Ask for the sudo password now, without waiting for a privileged action. */
+
   requestElevation: (action: string) => Promise<boolean>;
-  /** End the grant early, like `sudo -k`. */
+
   endElevation: () => Promise<void>;
-  /** True while an elevation grant is active (until it lapses or is ended). */
+
   elevated: boolean;
-  /** The live status, or null before it has been read. */
+
   sudo: SudoState | null;
   refresh: () => void;
 };
@@ -61,7 +49,6 @@ export function SudoProvider({ children }: { children: ReactNode }) {
         const data = (await res.json()) as { sudo?: SudoState };
         if (data.sudo) setSudo(data.sudo);
       } catch {
-        // The dialog reports real failures; this is only a status chip.
       }
     })();
   }, []);
@@ -70,7 +57,6 @@ export function SudoProvider({ children }: { children: ReactNode }) {
     refresh();
   }, [refresh]);
 
-  /** Open the dialog and resolve with whether a grant was opened. */
   const promptFor = useCallback(
     (action: string) =>
       new Promise<boolean>((resolve) => {
@@ -108,8 +94,6 @@ export function SudoProvider({ children }: { children: ReactNode }) {
       if (!granted) return first;
       refresh();
 
-      // The request body is a plain string in every caller here, so retrying it is
-      // safe. A stream body would need to be rebuilt, hence the check.
       if (init?.body && typeof init.body !== 'string' && !(init.body instanceof FormData)) {
         return first;
       }
@@ -150,8 +134,6 @@ export function SudoProvider({ children }: { children: ReactNode }) {
 export function useSudo(): ElevationContext {
   const ctx = useContext(Ctx);
   if (!ctx) {
-    // Pages rendered outside the provider (or during a static export) still work,
-    // they just cannot elevate.
     return {
       fetchElevated: (input, init) => fetch(input, init),
       requestElevation: async () => false,
@@ -172,7 +154,7 @@ function SudoDialog({ action, onDone }: { action: string; onDone: (ok: boolean) 
   async function submit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     if (busy) return;
-    // Read from the DOM: password managers autofill without firing React's onChange.
+
     const value =
       (e.currentTarget.elements.namedItem('sudo_password') as HTMLInputElement | null)?.value ?? '';
     if (!value) {

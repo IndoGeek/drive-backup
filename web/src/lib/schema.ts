@@ -8,7 +8,7 @@ export type FieldType =
   | 'string[]';
 
 export type Field = {
-  key: string; // dotted path into config.yml
+  key: string;
   label: string;
   type: FieldType;
   help?: string;
@@ -35,13 +35,6 @@ export const LOG_LEVELS = ['debug', 'info', 'warn', 'error'];
 export const CIPHERS = ['AES256', 'AES192', 'AES128'];
 export const SHUTDOWN_SIGNALS = ['stop', 'kill'];
 
-/**
- * Every editable, non-schedule setting. The *daily* schedule keys
- * (`backup.time`, `backup.backups_per_day`, `backup.times`) deliberately live on
- * the Dashboard instead, so no option appears on two pages. World-backup times are
- * a property of the world-backup feature, so they are configured here with the
- * rest of it.
- */
 export const CONFIG_SECTIONS: Section[] = [
   {
     id: 'general',
@@ -246,12 +239,10 @@ export const CONFIG_FIELDS: Field[] = CONFIG_SECTIONS.flatMap((s) => s.fields);
 export const CONFIG_KEYS = new Set(CONFIG_FIELDS.map((f) => f.key));
 export const FIELD_BY_KEY = new Map(CONFIG_FIELDS.map((f) => [f.key, f]));
 
-/** Keys owned by the Dashboard schedule panel. */
 export const SCHEDULE_KEYS = new Set([
   'backup.time',
   'backup.backups_per_day',
-  // Exact run times. When non-empty it *is* the schedule, and the two keys above
-  // are only the fallback — which is why both live together on the Dashboard.
+
   'backup.times',
 ]);
 
@@ -276,12 +267,6 @@ export const SCHEDULE_FIELDS: Field[] = [
   },
 ];
 
-/**
- * Normalise "6:5" / "06:05 " to "06:05", or null when it is not a time.
- *
- * The daemon silently drops a time it cannot parse, which would look like "the
- * schedule saved but nothing runs", so the panel refuses it first.
- */
 export function normalizeTime(value: unknown): string | null {
   const text = String(value ?? '').trim();
   const m = /^(\d{1,2}):(\d{1,2})$/.exec(text);
@@ -292,12 +277,6 @@ export function normalizeTime(value: unknown): string | null {
   return `${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}`;
 }
 
-/**
- * Check one schedule value, returning a message a human can act on.
- *
- * Covers the keys whose mistakes the daemon cannot report back: a bad time is
- * dropped silently there, and the run simply never happens.
- */
 export function validateScheduleValue(key: string, value: unknown): string | null {
   if (key === 'backup.time') {
     return normalizeTime(value) ? null : `'backup.time' must be a 24-hour HH:MM time, got '${String(value)}'`;
@@ -315,7 +294,6 @@ export function validateScheduleValue(key: string, value: unknown): string | nul
   return null;
 }
 
-/** Coerce a form value to the type the YAML file expects. */
 export function coerce(field: Field, value: unknown): unknown {
   switch (field.type) {
     case 'number': {

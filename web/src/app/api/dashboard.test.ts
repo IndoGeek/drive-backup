@@ -3,17 +3,10 @@ import path from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 
-/**
- * The Dashboard's own endpoints: streaming action output, paginated history, and
- * the schedule keys. These run against a fake binary and a fake history.db so they
- * exercise the real routes without a daemon, sudo or a multi-hour backup.
- */
-
 let cookie = '';
 let instanceRoot = '';
 let binDir = '';
 
-/** A stand-in for backup-mgr that prints, pauses, then exits with `code`. */
 function writeFakeBinary(name: string, lines: string[], code = 0, pauseMs = 250): string {
   const file = path.join(binDir, name);
   fs.writeFileSync(
@@ -53,7 +46,6 @@ beforeAll(async () => {
   process.env.BACKUP_MGR_ADMIN_USER = account.name;
   useSudoFixture({ [account.name]: { has_sudo: true, passwordless: true } });
 
-  // A provisioned instance: the routes refuse to act without a config.yml.
   fs.writeFileSync(
     path.join(instanceRoot, 'config.yml'),
     ['backup:', '  time: "03:30"', '  backups_per_day: 1', 'database:', '  file: "./history.db"', ''].join(
@@ -89,7 +81,6 @@ type StreamMessage = {
   message?: string;
 };
 
-/** Read the whole NDJSON response, keeping the chunk boundaries. */
 async function readStream(res: Response): Promise<StreamMessage[][]> {
   const reader = res.body!.getReader();
   const decoder = new TextDecoder();
@@ -121,14 +112,10 @@ describe('streaming action output', () => {
     const chunks = await readStream(res);
     const flat = chunks.flat();
 
-    // The command line is echoed first, so the panel can show what is running.
     expect(flat[0].type).toBe('start');
     expect(flat[0].command).toContain('check');
     expect(flat[0].command).toContain(instanceRoot);
 
-    // Output was delivered progressively: the early lines arrived in a chunk of
-    // their own, before the process had finished. That is the whole point — the
-    // panel shows progress instead of freezing until the command exits.
     const stdoutChunks = chunks
       .map((c) => c.filter((m) => m.type === 'stdout').map((m) => m.data ?? '').join(''))
       .filter((text) => text.length > 0);
@@ -155,7 +142,7 @@ describe('streaming action output', () => {
       expect(exit.type).toBe('exit');
       expect(exit.ok).toBe(false);
       expect(exit.code).toBe(3);
-      // Never a sudo prompt: this command failed on its own terms.
+
       expect(flat.some((m) => m.type === 'error')).toBe(false);
     } finally {
       process.env.BACKUP_MGR_BIN = original;

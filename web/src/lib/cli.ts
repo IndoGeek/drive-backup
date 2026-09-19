@@ -7,21 +7,13 @@ export type CliResult = {
   code: number | null;
   stdout: string;
   stderr: string;
-  /** Command line, for logging in the UI. Credentials never appear here. */
+
   command: string;
-  /** Set when the process could not be started — e.g. sudo refused. */
+
   spawnError?: string;
   viaSudo: boolean;
 };
 
-/**
- * Run the shared backup-mgr binary against one instance's config, as that
- * instance's Linux user. Never throws for a non-zero exit status: callers inspect
- * `.ok` / `.code`.
- *
- * The binary is installed once and read-only for everyone; what makes the tenants
- * separate is which user runs it and which config it is pointed at.
- */
 export async function runCli(
   inst: Instance,
   args: string[],
@@ -51,11 +43,6 @@ export async function runCli(
   };
 }
 
-/**
- * Advice shown when a JSON command cannot be interpreted. Overwhelmingly this is
- * a stale binary on PATH (one built before the command existed), which otherwise
- * fails in confusing, sometimes side-effecting ways.
- */
 export function staleBinaryHint(): string {
   return (
     'the shared backup-mgr binary may be out of date. Rebuild and install it with ' +
@@ -65,13 +52,6 @@ export function staleBinaryHint(): string {
   );
 }
 
-/**
- * Run the shared binary as the panel's own user, with no instance and no config.
- *
- * The binary is installed once for everyone, so questions about *it* — what build
- * is installed, does it understand the JSON interface — are panel-level and must
- * not be asked through a user's instance.
- */
 export function runBinary(args: string[], timeoutMs = 15_000): Promise<CliResult> {
   const bin = binaryPath();
   return new Promise((resolve) => {
@@ -95,18 +75,11 @@ export function runBinary(args: string[], timeoutMs = 15_000): Promise<CliResult
   });
 }
 
-/**
- * True when the binary understands the JSON interface. Checked before commands
- * that would otherwise be *destructive* when misparsed — a binary from before
- * `restore --json` treats `--json` as a filename and starts a real restore
- * attempt (logging a failure and firing a notification).
- */
 export async function binarySupportsJson(inst: Instance): Promise<boolean> {
   const res = await runCli(inst, ['version', '--json'], 15_000);
   return parseTrailingJson<{ version?: string }>(res.stdout) !== null;
 }
 
-/** backup-mgr logs to stdout too, so the JSON payload is the last line. */
 export function parseTrailingJson<T>(stdout: string): T | null {
   const lines = stdout.trimEnd().split('\n');
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -115,7 +88,6 @@ export function parseTrailingJson<T>(stdout: string): T | null {
     try {
       return JSON.parse(line) as T;
     } catch {
-      // keep looking
     }
   }
   return null;

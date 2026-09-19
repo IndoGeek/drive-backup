@@ -6,13 +6,6 @@ import { recordAudit } from './audit';
 import { clientAddress } from './session';
 import type { User } from './users';
 
-/**
- * Resolve which instance a request operates on, or the response to send instead.
- *
- * Routes default to the caller's own instance. Only an admin may name another via
- * `?user=` / `{"user": …}`, because someone has to be able to repair a user's
- * instance — but that is explicit rather than ambient.
- */
 export function pickInstance(
   req: Request,
   user: User,
@@ -40,14 +33,6 @@ export function pickInstance(
   return { ok: true, inst };
 }
 
-/**
- * Resolve the instance for a *mutation*.
- *
- * Everything `pickInstance` does, plus one rule from the multi-user model: acting
- * on another account's instance is privileged work, so it needs the caller's own
- * sudo — silently when their rules are NOPASSWD, otherwise after a password. Reads
- * of another user's instance stay ungated for an admin.
- */
 export async function pickInstanceForMutation(
   req: Request,
   user: User,
@@ -62,9 +47,7 @@ export async function pickInstanceForMutation(
     `change something in ${picked.inst.osUser}'s instance`,
   );
   if (denial) return { ok: false, response: denial };
-  // Cross-user changes are the interesting half of an audit trail, and every one
-  // of them comes through here — so this is where they are recorded. The endpoint
-  // is enough to say *what* was changed; the target says whose.
+
   const method = req.method || 'POST';
   let path = '';
   try {
@@ -94,10 +77,6 @@ export function instanceView(inst: Instance) {
   };
 }
 
-/**
- * Refuse with a 409 when the instance has not been created yet, rather than
- * letting the command fail with an opaque error about a missing config file.
- */
 export async function requireProvisioned(inst: Instance): Promise<NextResponse | null> {
   if (await existsAs(inst, inst.configPath)) return null;
   return NextResponse.json(

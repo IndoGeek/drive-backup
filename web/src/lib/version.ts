@@ -14,14 +14,12 @@ export type ExpectedBuild = {
 };
 
 export type VersionComparison = {
-  /** True when the installed binary does not match the checkout being served. */
   stale: boolean;
   reasons: string[];
   installed: BuildInfo | null;
   expected: ExpectedBuild;
 };
 
-/** Read `version = "x.y.z"` out of the project's Cargo.toml. */
 export function expectedVersion(cargoTomlPath: string): string | null {
   try {
     const text = readFileSync(cargoTomlPath, 'utf8');
@@ -32,7 +30,6 @@ export function expectedVersion(cargoTomlPath: string): string | null {
   }
 }
 
-/** Cargo.toml within the served checkout. */
 export function cargoTomlPath(projectRoot: string): string {
   return path.join(projectRoot, 'Cargo.toml');
 }
@@ -43,13 +40,6 @@ function known(value: string | null | undefined): value is string {
   return !!value && !UNKNOWN.has(value.trim().toLowerCase());
 }
 
-/**
- * Decide whether the installed binary is out of date relative to the checkout
- * the panel is serving. Pure so it can be unit tested without a toolchain.
- *
- * A comparison is only made on a field when both sides are known — a binary
- * built from a tarball (commit `unknown`) is not reported as stale for that.
- */
 export function compareBuild(
   installed: BuildInfo | null,
   expected: ExpectedBuild,

@@ -3,9 +3,6 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Restrict a file that holds secrets (config.yml, rclone.conf) to owner-only
-/// access (0600), so the passphrase / API key / OAuth tokens cannot be read by
-/// other users on the host.
 pub fn restrict_file_permissions(path: &Path) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
@@ -53,12 +50,7 @@ pub struct BackupCfg {
     pub time: String,
     #[serde(default = "default_bpd")]
     pub backups_per_day: u32,
-    /// Explicit daily run times ("HH:MM").
-    ///
-    /// Empty (the default) keeps the historical behaviour: `time` plus
-    /// `backups_per_day` evenly-spaced slots anchored at `time`. Set it when the
-    /// runs should happen at specific times rather than at even intervals — two
-    /// entries mean two backups a day at exactly those times.
+
     #[serde(default)]
     pub times: Vec<String>,
     #[serde(default = "default_timestamp_fmt")]
@@ -333,9 +325,6 @@ fn yaml_quote(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-/// Persist OAuth token fields back into a YAML section (e.g. `google_drive`
-/// or `storage.secondary`) while preserving comments and other keys.
-/// `section` is the key name, `section_indent` its indentation in the file.
 pub fn update_remote_token_fields(path: &Path, section: &str, section_indent: usize, refresh: &str, access: &str, expiry: &str) -> Result<(), String> {
     let raw = fs::read_to_string(path)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
@@ -345,7 +334,6 @@ pub fn update_remote_token_fields(path: &Path, section: &str, section_indent: us
     let keys = ["refresh_token", "access_token", "expiry"];
     let vals = [refresh, access, expiry];
 
-    // Drop trailing whitespace so indentation is measured correctly.
     for l in lines.iter_mut() {
         let trimmed = l.trim_end().to_string();
         *l = trimmed;
@@ -395,8 +383,6 @@ pub fn update_remote_token_fields(path: &Path, section: &str, section_indent: us
         }
     }
 
-    // Write atomically (temp file in the same directory + rename) so a crash
-    // mid-write cannot leave config.yml truncated and the daemon unstartable.
     let data = lines.join("\n") + "\n";
     let dir = path
         .parent()
@@ -418,8 +404,7 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self, String> {
         let raw = fs::read_to_string(path)
             .map_err(|e| format!("cannot read config {}: {}", path.display(), e))?;
-        // Tighten an existing config that may have been created with a looser
-        // umask; best-effort so a read-only config still loads.
+
         let _ = restrict_file_permissions(path);
         let inner: ConfigStruct = serde_yaml::from_str(&raw)
             .map_err(|e| format!("cannot parse config {}: {}", path.display(), e))?;
@@ -447,9 +432,7 @@ impl Config {
         if self.inner.backup.backups_per_day == 0 {
             self.inner.backup.backups_per_day = 1;
         }
-        // Keep only usable times, sorted and de-duplicated, so the daemon's
-        // schedule and the panel's view of it cannot disagree about "06:00" vs
-        // "6:00 " or run the same slot twice.
+
         let mut times: Vec<u32> = self
             .inner
             .backup

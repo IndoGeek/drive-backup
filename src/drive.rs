@@ -4,7 +4,6 @@ use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-/// A generic rclone remote (primary or fallback).
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
 pub struct Remote {
@@ -97,7 +96,6 @@ pub fn secondary_remote(cfg: &Config) -> Option<Remote> {
     })
 }
 
-/// All active remotes (primary first, secondary if enabled).
 pub fn active_remotes(cfg: &Config) -> Vec<Remote> {
     let mut v = vec![primary_remote(cfg)];
     if let Some(s) = secondary_remote(cfg) {
@@ -114,7 +112,6 @@ fn rclone_conf_path() -> PathBuf {
     PathBuf::from(home).join(".config/rclone/rclone.conf")
 }
 
-/// OAuth credentials parsed back out of the rclone config file after a reconnect.
 #[derive(Clone, Debug, Default)]
 pub struct TokenCreds {
     pub access_token: String,
@@ -122,8 +119,6 @@ pub struct TokenCreds {
     pub expiry: String,
 }
 
-/// Read the freshly-issued token for a remote back out of the rclone config,
-/// so it can be persisted into config.yml for future runs.
 pub fn read_config_token(r: &Remote) -> Result<TokenCreds, String> {
     let path = rclone_conf_path();
     let raw = std::fs::read_to_string(&path)
@@ -139,7 +134,7 @@ pub fn read_config_token(r: &Remote) -> Result<TokenCreds, String> {
             }
             continue;
         }
-        // end of section
+
         if t.starts_with('[') {
             break;
         }
@@ -234,16 +229,10 @@ fn merge_section(path: &Path, existing: &str, section: &str, overrides: &[(Strin
 
     let out = lines.join("\n") + "\n";
     std::fs::write(path, out).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-    // rclone.conf holds OAuth tokens: keep it owner-only.
+
     crate::config::restrict_file_permissions(path)
 }
 
-/// Write client credentials / cached tokens for a remote into the rclone config.
-///
-/// - If the section does not exist yet it is created as `type = drive` (primary-style).
-/// - If it exists and is a `drive` section, client creds / tokens from config.yml are merged in.
-/// - Any other remote type (e.g. `b2`, `local`) is left completely untouched, so a
-///   non-Drive fallback remote keeps working with its own rclone-managed credentials.
 pub fn ensure_remote_section(r: &Remote, logger: &Logger) -> Result<(), String> {
     let path = rclone_conf_path();
     if let Some(parent) = path.parent() {
@@ -252,7 +241,7 @@ pub fn ensure_remote_section(r: &Remote, logger: &Logger) -> Result<(), String> 
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
     let existing_type = section_type(&existing, &r.remote);
     let overrides = match &existing_type {
-        None => r.to_overrides(), // brand new -> drive section
+        None => r.to_overrides(),
         Some(t) if t.trim().to_lowercase() == "drive" => r.to_overrides(),
         Some(_) => {
             logger.debug(&format!(
@@ -321,7 +310,6 @@ pub fn list_backups(r: &Remote) -> Result<Vec<RemoteFile>, String> {
         .map_err(|e| format!("cannot parse rclone lsjson output: {e}"))
 }
 
-/// Reachability + auth check. A missing folder is fine (created later).
 pub fn check_remote(r: &Remote) -> Result<(), String> {
     let remote = r.label();
     let out = run_rclone(&["lsd", &remote])?;
@@ -349,7 +337,6 @@ pub fn ensure_dir(r: &Remote) -> Result<(), String> {
     Ok(())
 }
 
-/// Copy a local file to the remote and verify size afterwards.
 pub fn upload_file(r: &Remote, local: &Path, logger: &Logger) -> Result<(), String> {
     ensure_dir(r)?;
     let remote = r.label();
@@ -391,7 +378,6 @@ pub fn delete_file(r: &Remote, name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Keep the newest `retention` backups matching ext, delete the rest.
 pub fn prune_remote(r: &Remote, ext: &str, retention: u32, logger: &Logger) -> Result<Vec<String>, String> {
     let files = list_backups(r)?;
     let mut ours: Vec<RemoteFile> = files
@@ -408,7 +394,6 @@ pub fn prune_remote(r: &Remote, ext: &str, retention: u32, logger: &Logger) -> R
     Ok(deleted)
 }
 
-/// Download a remote file to a local path.
 pub fn download_file(r: &Remote, name: &str, dest: &Path, logger: &Logger) -> Result<(), String> {
     let remote = remote_arg(r, name);
     let parent = dest.parent().unwrap_or_else(|| Path::new("."));
@@ -416,8 +401,7 @@ pub fn download_file(r: &Remote, name: &str, dest: &Path, logger: &Logger) -> Re
 
     let parent_str = parent.to_string_lossy().to_string();
     logger.info(&format!("downloading {} -> {}", remote, dest.display()));
-    // rclone copy expects a *directory* destination; download into the parent
-    // dir, then rename the landed file to `dest` if it differs.
+
     let out = run_rclone(&["copy", &remote, &parent_str])?;
     if !out.status.success() {
         return Err(format!(
@@ -428,7 +412,6 @@ pub fn download_file(r: &Remote, name: &str, dest: &Path, logger: &Logger) -> Re
 
     let landed = parent.join(name);
     if dest.is_dir() {
-        // caller passed a directory: file is already at landed, nothing to do
         if !landed.exists() {
             return Err(format!("downloaded file not found at {}", landed.display()));
         }
@@ -438,7 +421,6 @@ pub fn download_file(r: &Remote, name: &str, dest: &Path, logger: &Logger) -> Re
     Ok(())
 }
 
-/// MD5 of a remote file via `rclone hashsum` (reads the file on the remote).
 pub fn remote_md5(r: &Remote, name: &str) -> Result<String, String> {
     let remote = r.label();
     let out = run_rclone(&["hashsum", "MD5", &remote])?;
@@ -460,7 +442,6 @@ pub fn remote_md5(r: &Remote, name: &str) -> Result<String, String> {
     Err(format!("no hash found for {} on {}", name, remote))
 }
 
-/// MD5 of a local file via `rclone hashsum`.
 pub fn local_md5(path: &Path) -> Result<String, String> {
     let s = path.to_string_lossy();
     let out = run_rclone(&["hashsum", "MD5", &s])?;
@@ -478,7 +459,6 @@ pub fn local_md5(path: &Path) -> Result<String, String> {
     first.split_whitespace().next().map(String::from).ok_or_else(|| "empty hash output".into())
 }
 
-/// Hash every file on a remote into a name -> MD5 map (single hashsum pass).
 pub fn remote_hash_map(r: &Remote) -> Result<std::collections::HashMap<String, String>, String> {
     let remote = r.label();
     let out = run_rclone(&["hashsum", "MD5", &remote])?;

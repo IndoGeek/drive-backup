@@ -5,7 +5,7 @@ export default defineConfig({
   test: {
     environment: 'node',
     include: ['src/**/*.test.ts'],
-    // Route tests share a temp SQLite file, so keep each file isolated.
+
     pool: 'forks',
   },
   resolve: {

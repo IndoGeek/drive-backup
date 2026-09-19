@@ -38,17 +38,13 @@ export async function POST(req: Request) {
   const result = await verifySystemPassword(username, password);
 
   if (!result.ok) {
-    // Misconfiguration is not a failed login: report it plainly and do not count
-    // it against the account, or an admin lockout would be blamed on the attacker.
     if (result.reason === 'sudo' || result.reason === 'tooling') {
       console.error(`[login] cannot verify passwords: ${result.message}`);
       return NextResponse.json({ error: result.message }, { status: 500 });
     }
 
     recordFailure(key);
-    // Locked and password-less accounts are reported vaguely on purpose: saying
-    // "this account is locked" would confirm that a username exists. The real
-    // reason goes to the panel log for an administrator to read.
+
     if (result.reason === 'locked' || result.reason === 'no-password') {
       console.warn(`[login] refusing '${username}': ${result.reason}`);
       return NextResponse.json(
@@ -59,8 +55,6 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'Invalid username or password' }, { status: 401 });
   }
 
-  // Verified against Linux, so the account exists. Mirror it into the panel, which
-  // is what makes `useradd` alone enough to gain access.
   const user = ensureUser(username);
   if (!user) {
     return NextResponse.json({ error: 'This account cannot sign in to the panel' }, { status: 403 });

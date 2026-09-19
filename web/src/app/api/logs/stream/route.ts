@@ -11,11 +11,6 @@ export const dynamic = 'force-dynamic';
 const INITIAL_BYTES = 20_000;
 const POLL_MS = 1500;
 
-/**
- * Instance logs are owned by another Linux user and cannot be opened directly, so
- * size and content are fetched as that user. Panel logs are the panel's own and
- * are read with plain fs calls — the same distinction the listing code makes.
- */
 async function sizeOf(inst: Instance, full: string, access: 'instance' | 'panel'): Promise<number | null> {
   if (access === 'panel') {
     try {
@@ -30,7 +25,6 @@ async function sizeOf(inst: Instance, full: string, access: 'instance' | 'panel'
   return Number.isFinite(n) ? n : null;
 }
 
-/** Everything from `offset` onwards. Returns null when the file is unreadable. */
 async function readFrom(
   inst: Instance,
   full: string,
@@ -54,7 +48,7 @@ async function readFrom(
       return null;
     }
   }
-  // `-c +N` is 1-based, so byte `offset` is the first byte not yet sent.
+
   const res = await runAs(inst, 'tail', ['-c', `+${offset + 1}`, '--', full], { timeoutMs: 15_000 });
   return res.ok ? res.stdout : null;
 }
@@ -75,7 +69,7 @@ export async function GET(req: Request) {
   const def = findLogSource(logSourceDefs(inst, await backupLogDir(inst)), sourceId);
   if (!def) return new Response(`unknown log source '${sourceId}'`, { status: 400 });
 
-  const full = path.join(def.dir, path.basename(file)); // basename prevents traversal
+  const full = path.join(def.dir, path.basename(file));
   const encoder = new TextEncoder();
 
   let offset = 0;
@@ -105,7 +99,7 @@ export async function GET(req: Request) {
             frame('error', 'cannot read log file');
             return;
           }
-          if (current < offset) offset = 0; // rotated or truncated
+          if (current < offset) offset = 0;
           if (current > offset) {
             const chunk = await readFrom(inst, full, offset, def.access);
             if (chunk === null) {
@@ -132,7 +126,6 @@ export async function GET(req: Request) {
         try {
           controller.close();
         } catch {
-          // already closed
         }
       };
       req.signal.addEventListener('abort', stop);

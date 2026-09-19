@@ -36,8 +36,7 @@ export async function GET(req: Request) {
   const page = await historyForInstance(inst, dbPath, limit, offset);
   return NextResponse.json({
     runs: page.runs,
-    // Paging needs a total; the panel must not have to guess whether another
-    // page exists from a short page alone.
+
     total: page.total,
     limit,
     offset,

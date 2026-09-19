@@ -13,12 +13,6 @@ const OUTCOMES: AuditOutcome[] = [
   'failed',
 ];
 
-/**
- * The privileged-action trail: who elevated, what changed, and when.
- *
- * Admin-only (`users.manage`), because it covers every account's actions. It is a
- * read, so — like every other read in the panel — it does not itself need sudo.
- */
 export async function GET(req: Request) {
   const g = guard(req, 'users.manage');
   if (!g.ok) return g.response;

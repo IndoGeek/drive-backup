@@ -1,10 +1,3 @@
-//! Embeds build provenance (git commit + build time) into the binary.
-//!
-//! The web panel compares this stamp against the checkout it is serving, so a
-//! stale `/usr/local/bin/backup-mgr` is reported instead of silently producing
-//! confusing behaviour. Every step is best-effort: a source tarball with no git
-//! history still builds, it just reports `unknown`.
-
 use std::process::Command;
 
 fn run(program: &str, args: &[&str]) -> Option<String> {
@@ -22,12 +15,11 @@ fn run(program: &str, args: &[&str]) -> Option<String> {
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    // Re-run when the checked-out commit changes so the stamp stays accurate.
+
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/refs/heads");
 
     let commit = match run("git", &["rev-parse", "--short", "HEAD"]) {
-        // A dirty tree means the binary does not match any commit exactly.
         Some(sha) => {
             if run("git", &["status", "--porcelain"]).is_some() {
                 format!("{sha}-dirty")

@@ -12,8 +12,6 @@ export async function GET(req: Request) {
   const id = new URL(req.url).searchParams.get('id');
   if (!id) return NextResponse.json({ error: 'missing id' }, { status: 400 });
 
-  // Jobs are owned by the Linux user who started them: a live authorization job
-  // holds an OAuth token, so it must not be readable across tenants.
   const picked = pickInstance(req, g.user);
   const owner = picked.ok ? picked.inst.osUser : g.user.username;
 

@@ -3,13 +3,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-/**
- * The multi-user model promises that `useradd` is the whole story: a new Linux
- * account becomes a panel user with nobody opening the panel. These tests drive
- * that promise end to end — start the watcher, add an account to the account
- * database, and wait for it to appear — rather than calling the sync directly.
- */
-
 const ACCOUNT = { name: 'watchadmin', uid: 1500, gid: 1500, home: '/home/watchadmin' };
 const EXISTING = { name: 'existing', uid: 1000, gid: 1000, home: '/home/existing' };
 
@@ -23,7 +16,7 @@ beforeAll(async () => {
   process.env.BACKUP_MGR_DATA_DIR = dataDir;
   process.env.BACKUP_MGR_USERS_DB = path.join(dataDir, 'panel.db');
   process.env.BACKUP_MGR_ADMIN_USER = ACCOUNT.name;
-  // Keep the loops fast so the test does not wait on the production defaults.
+
   process.env.BACKUP_MGR_AUTO_SYNC_INTERVAL_MS = '2000';
   process.env.BACKUP_MGR_PASSWD_WATCH_INTERVAL_MS = '300';
   process.env.BACKUP_MGR_OSUSER_CACHE_MS = '100';
@@ -37,7 +30,6 @@ afterAll(async () => {
   stopUserWatch();
 });
 
-/** Append an account the way `useradd` would, then let the watcher notice. */
 function addOsUser(name: string, uid: number): void {
   fs.appendFileSync(
     passwdFile,
@@ -64,7 +56,7 @@ describe('the account watcher', () => {
       expect(state.running).toBe(true);
       expect(state.auto_sync).toBe(true);
       expect(state.watching_file).toBe(passwdFile);
-      // The startup pass is what makes the panel correct the moment it comes up.
+
       expect(await waitFor(() => userWatchState().last?.reason === 'startup')).toBe(true);
     },
     20_000,
@@ -83,7 +75,7 @@ describe('the account watcher', () => {
       const user = getUserByName('latecomer');
       expect(user?.enabled).toBe(true);
       expect(user?.is_admin).toBe(false);
-      // Usable at once: the account can sign in and sees its own instance.
+
       expect(user?.instance?.osUser).toBe('latecomer');
       expect(user?.instance?.pm2Name).toBe('backup-mgr-latecomer');
     },
@@ -99,7 +91,7 @@ describe('the account watcher', () => {
 
   it('does not provision the new account unless auto-provision is enabled', async () => {
     const { userWatchState } = await import('./userwatch');
-    // Provisioning writes into a user's home, so it is opt-in by design.
+
     expect(userWatchState().auto_provision).toBe(false);
     expect(userWatchState().provisioned).toEqual([]);
     expect(fs.existsSync('/home/latecomer/backup-mgr')).toBe(false);
@@ -110,8 +102,7 @@ describe('the account watcher', () => {
     async () => {
       const { getUserByName } = await import('./users');
       const { userWatchState } = await import('./userwatch');
-      // `userdel existing` — the watcher's own report is what we wait on, not a
-      // live read, so this proves the passwd change was noticed by the watcher.
+
       const kept = fs
         .readFileSync(passwdFile, 'utf8')
         .split('\n')
@@ -123,7 +114,7 @@ describe('the account watcher', () => {
         () => userWatchState().last?.missing.includes('existing') === true,
       );
       expect(noticed).toBe(true);
-      // Never deleted here — an admin prunes, so permissions survive a re-add.
+
       const record = getUserByName('existing');
       expect(record).not.toBeNull();
       expect(record?.orphaned).toBe(true);
@@ -136,7 +127,7 @@ describe('the account watcher', () => {
     const before = userWatchState().last?.at;
     startUserWatch();
     expect(userWatchState().running).toBe(true);
-    // No second loop was created, so the last report is untouched by the call.
+
     expect(userWatchState().last?.at).toBe(before);
   });
 });

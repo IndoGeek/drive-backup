@@ -10,17 +10,6 @@ function targetPath(target: string): string[] {
   return target === 'secondary' ? ['storage', 'secondary'] : ['google_drive'];
 }
 
-/**
- * Which OAuth client this instance will refresh its token with.
- *
- * The token must be issued for the SAME client: `drive.rs` only copies
- * `client_id`/`client_secret` into the rclone config when they are non-empty, so
- * a blank pair means rclone's built-in client. A token minted for one client is
- * rejected by the other once the one-hour access token expires, which makes the
- * mismatch show up long after authorization appeared to succeed — so the UI
- * shows the exact command to run. Only the client id is returned; it is public
- * (it appears in consent URLs) and never the secret.
- */
 export async function GET(req: Request) {
   const g = guard(req, 'remote.auth');
   if (!g.ok) return g.response;
@@ -53,14 +42,6 @@ export async function GET(req: Request) {
   }
 }
 
-/**
- * Remote-friendly auth: the browser is often on a different machine than the
- * panel, where rclone's 127.0.0.1 callback is unreachable. Users can run
- * `rclone authorize` on any machine that has a browser — including their own
- * laptop — and paste the resulting token here. The token is not tied to the OS
- * user or host that produced it, only to the Google account and the OAuth
- * client used.
- */
 export async function POST(req: Request) {
   const g = guard(req, 'remote.auth');
   if (!g.ok) return g.response;

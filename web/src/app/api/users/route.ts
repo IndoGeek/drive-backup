@@ -11,16 +11,6 @@ import { clientAddress } from '@/lib/session';
 
 export const runtime = 'nodejs';
 
-/**
- * User management in the multi-user model.
- *
- * Users are *mirrored* from Linux, so there is nothing to create or delete here:
- * `useradd` adds someone, `userdel` removes them, and the panel's watcher
- * (./lib/userwatch.ts) reconciles the two automatically. What an admin controls
- * is authorization (permissions, admin, blocked) and whether a user's instance
- * has been created on disk.
- */
-
 type ProvisionBody = { action: 'provision'; username?: string };
 type ProvisionAllBody = { action: 'provision_all' };
 type SyncBody = { action: 'sync' };
@@ -35,30 +25,21 @@ type UpdateBody = {
 export async function GET(req: Request) {
   const g = guard(req, 'users.manage');
   if (!g.ok) return g.response;
-  // Reconcile first so a Linux account added a moment ago is already listed. This
-  // goes through the watcher rather than calling the store directly, so it shares
-  // one implementation — and so the reported "last synced" time is always honest.
+
   await syncUsersNow('request');
   return NextResponse.json({
     users: viewAll(),
-    // So the page can say when the mirror last synced and on what schedule.
+
     sync: userWatchState(),
-    // Whether this admin may actually change anything: admin follows sudo, and a
-    // sudo password may be needed (see lib/sudo.ts).
+
     sudo: await sudoStatus(req, g.user.username),
   });
 }
 
-/**
- * Managing users is privileged work, so it is authorized against the caller's own
- * sudo — NOPASSWD means no prompt, otherwise the UI asks for the password once and
- * retries (see /api/sudo).
- */
 async function elevation(req: Request, user: User) {
   return authorizePrivileged(req, user, 'manage users');
 }
 
-/** Record the change that was just made, so the trail says what and by whom. */
 function audit(
   req: Request,
   user: User,
@@ -111,8 +92,6 @@ export async function POST(req: Request) {
   }
 
   if (body?.action === 'provision_all') {
-    // One click for a fresh install: give every mirrored account that does not
-    // have one yet its own directories and seeded config.yml.
     const done: string[] = [];
     const kept: string[] = [];
     const failed: { username: string; error: string }[] = [];
@@ -143,9 +122,7 @@ export async function POST(req: Request) {
     if (!inst) {
       return NextResponse.json({ error: `no such mirrored account: ${username}` }, { status: 404 });
     }
-    // Creates the directory tree, seeds config.yml from the template and writes an
-    // ecosystem file — all as that user, in their own home. Never overwrites an
-    // existing config.yml, which holds their passphrase and tokens.
+
     const result = await provision(inst);
     audit(
       req,
@@ -187,8 +164,6 @@ export async function PATCH(req: Request) {
     return NextResponse.json({ error: 'valid user id required' }, { status: 400 });
   }
 
-  // Admin is not the panel's to grant: it mirrors sudo on the server. Say so
-  // plainly instead of silently ignoring it, which would look like a bug.
   if (body?.is_admin !== undefined) {
     return NextResponse.json(
       {
@@ -230,7 +205,7 @@ function view(u: ReturnType<typeof listUsers>[number]) {
   return {
     ...u,
     instance: u.instance ? instanceView(u.instance) : null,
-    // Where this account's privileges come from, so the UI can explain them.
+
     sudo: { has_sudo: u.sudo.has_sudo, source: u.sudo.source, nopass_hint: u.sudo.nopass_hint },
   };
 }

@@ -88,9 +88,9 @@ type Status = {
     timezone: string;
     encrypt_enabled: boolean;
     upload_to_all: boolean;
-    /** Exact run times, set only by a binary that understands `backup.times`. */
+
     times?: string[];
-    /** The effective daily schedule, in HH:MM — what this build will actually do. */
+
     schedule?: string[];
   };
   remotes: { label: string; retention: number }[];
@@ -122,7 +122,6 @@ type RunRow = {
   error: string;
 };
 
-/** A second destination as it appears in config.yml (may be configured but off). */
 type SecondaryRemote = { enabled: boolean; remote: string; dir: string; retention: number };
 
 function human(bytes: number | null): string {
@@ -157,8 +156,7 @@ const PAGE_SIZES = [5, 10, 25];
 
 export default function DashboardPage() {
   const { loading: meLoading, can } = useMe();
-  // Privileged actions (reinstalling the shared binary) run under this user's own
-  // sudo; fetchElevated asks for the password only when sudo would.
+
   const { fetchElevated } = useSudo();
 
   const [status, setStatus] = useState<Status | null>(null);
@@ -177,14 +175,12 @@ export default function DashboardPage() {
   const [noPtero, setNoPtero] = useState(true);
   const [force, setForce] = useState(false);
 
-  // Terminal
   const [output, setOutput] = useState('');
   const [running, setRunning] = useState(false);
   const [lastResult, setLastResult] = useState<{ ok: boolean; code: number | null } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const consoleRef = useRef<HTMLPreElement | null>(null);
 
-  // Schedule
   const [mode, setMode] = useState<'even' | 'times'>('even');
   const [time, setTime] = useState('03:30');
   const [perDay, setPerDay] = useState('1');
@@ -222,11 +218,9 @@ export default function DashboardPage() {
     setTime(baseTime);
     setPerDay(basePerDay);
     setTimes(list.length ? list : [baseTime]);
-    // Which rule the file currently uses decides which mode opens.
+
     setMode(list.length ? 'times' : 'even');
-    // "configured but not used" is the state worth surfacing: a second destination
-    // that exists in the file but is switched off explains a Remotes card showing
-    // one entry on a server that looks like it has two.
+
     const sec = readPath(cfg, 'storage.secondary');
     if (sec && typeof sec === 'object') {
       const s = sec as Record<string, unknown>;
@@ -268,15 +262,12 @@ export default function DashboardPage() {
     };
   }, [loadStatus, loadSchedule, loadDaemon, loadBinary]);
 
-  // History has its own effect so paging re-fetches without resetting the timers
-  // above, and so the poll always reloads the page the user is actually on.
   useEffect(() => {
     void loadRuns();
     const t2 = setInterval(() => void loadRuns(), 20000);
     return () => clearInterval(t2);
   }, [loadRuns]);
 
-  // Keep the newest output in view as it streams in.
   useEffect(() => {
     const el = consoleRef.current;
     if (el) el.scrollTop = el.scrollHeight;
@@ -286,12 +277,6 @@ export default function DashboardPage() {
     setOutput((prev) => (prev + text).slice(-200_000));
   }
 
-  /**
-   * Run an action and show its output as it arrives.
-   *
-   * The response is newline-delimited JSON, one message per line, so the panel can
-   * render progress instead of freezing until the process exits.
-   */
   async function streamAction(
     action: string,
     options: Record<string, unknown> = {},
@@ -398,8 +383,6 @@ export default function DashboardPage() {
     setLastResult(null);
     setOutput('$ cargo build --release && sudo install -m 0755 target/release/backup-mgr …\n\n');
     try {
-      // fetchElevated handles the sudo prompt: this installs under *your* sudo, so
-      // a host with NOPASSWD never asks and one that prompts asks once.
       const res = await fetchElevated('/api/binary/install', { method: 'POST' });
       const data = (await res.json()) as {
         ok?: boolean;
@@ -451,8 +434,7 @@ export default function DashboardPage() {
         return;
       }
       payload['backup.times'] = list;
-      // Kept in step so switching back to even spacing does not need retyping, and
-      // so a daemon that predates `backup.times` still gets a sane schedule.
+
       payload['backup.time'] = list[0];
       payload['backup.backups_per_day'] = String(list.length);
     } else {
@@ -495,7 +477,6 @@ export default function DashboardPage() {
   const inFlight = state?.status === 'running';
   const nextMs = status?.next_run_at ? new Date(status.next_run_at).getTime() : null;
 
-  // What the daemon will actually run, from the daemon itself when it can say.
   const daemonSchedule = status?.config.schedule ?? null;
   const localPreview = mode === 'times' ? times.filter((t) => normalizeTime(t) !== null) : evenSpacing(time, Number(perDay));
   const scheduleDrifted =
@@ -639,17 +620,14 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {/* Status */}
+      {}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
         <Card>
           <CardHeader className="pb-2">
             <CardDescription>State</CardDescription>
             <CardTitle className="flex items-center gap-2 text-lg">
-              {/*
-                A cross means "something is wrong". Work in progress is not wrong —
-                a run that is currently checking or backing up shows as in progress,
-                and only a failure (or a run waiting on a human) is marked failed.
-              */}
+              {
+}
               {failed ? (
                 <XCircle className="h-5 w-5 shrink-0 text-destructive" />
               ) : inFlight ? (
@@ -723,10 +701,8 @@ export default function DashboardPage() {
                 {r.label} · keep {r.retention}
               </div>
             ))}
-            {/*
-              A destination that is configured but switched off is the reason a
-              server that "has two remotes" shows one: say so instead of hiding it.
-            */}
+            {
+}
             {secondary?.remote && !secondary.enabled && (
               <div
                 className="truncate text-muted-foreground/80"
@@ -752,7 +728,7 @@ export default function DashboardPage() {
         </Card>
       </div>
 
-      {/* Actions */}
+      {}
       <Card>
         <CardHeader>
           <CardTitle>Run actions</CardTitle>
@@ -867,7 +843,7 @@ export default function DashboardPage() {
         </CardContent>
       </Card>
 
-      {/* Daemon control */}
+      {}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
@@ -931,7 +907,7 @@ export default function DashboardPage() {
         </CardContent>
       </Card>
 
-      {/* Schedule */}
+      {}
       <Card>
         <CardHeader>
           <CardTitle>Schedule</CardTitle>
@@ -1019,7 +995,6 @@ export default function DashboardPage() {
                 size="sm"
                 onClick={() =>
                   setTimes((prev) => {
-                    // A sensible next slot: an hour after the last one.
                     const last = prev.length ? (minuteOf(prev[prev.length - 1]) ?? 210) : 210;
                     return [...prev, fmtMinute((last + 60) % 1440)];
                   })
@@ -1065,7 +1040,7 @@ export default function DashboardPage() {
         </CardContent>
       </Card>
 
-      {/* History */}
+      {}
       <Card>
         <CardHeader className="flex-row items-start justify-between gap-3 space-y-0">
           <div>

@@ -4,13 +4,6 @@ import { prepareAction, type ActionOptions } from '@/lib/actions';
 
 export const runtime = 'nodejs';
 
-/**
- * Run an action and return its whole output at once.
- *
- * The Dashboard uses `/api/actions/stream` so output appears as it happens; this
- * remains for callers that just want the finished result — scripts, and the API
- * tests, which assert on the collected output.
- */
 export async function POST(req: Request) {
   let body: { action?: string; options?: ActionOptions } | null = null;
   try {

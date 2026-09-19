@@ -2,11 +2,6 @@ import { NextResponse, type NextRequest } from 'next/server';
 
 const COOKIE_NAME = 'bm_session';
 
-/**
- * Edge middleware cannot use the user database or node crypto, so it only checks
- * that a well-formed, unexpired session cookie is present. Every API route still
- * verifies the signature and the user's permissions (see lib/auth.ts).
- */
 function hasPlausibleSession(value: string | undefined): boolean {
   if (!value) return false;
   const parts = value.split('.');

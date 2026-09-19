@@ -23,8 +23,6 @@ export async function GET(req: Request) {
   const notReady = await requireProvisioned(inst);
   if (notReady) return notReady;
 
-  // Refuse before running anything: an old binary would read `--json` as the
-  // name of a backup and start a genuine restore attempt.
   if (!(await binarySupportsJson(inst))) {
     return NextResponse.json(
       { error: `could not list backups — ${staleBinaryHint()}` },
@@ -32,8 +30,6 @@ export async function GET(req: Request) {
     );
   }
 
-  // Listing walks this instance's own local staging dir and its remotes, as its
-  // own user — so it can only ever see its own archives.
   const res = await runCli(inst, ['restore', '--json'], 60_000);
   const parsed = parseTrailingJson<BackupEntry[]>(res.stdout);
   if (!parsed) {

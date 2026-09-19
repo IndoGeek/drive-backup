@@ -45,8 +45,6 @@ describe('permission scopes', () => {
   });
 
   it('grants a new user only instance-scoped permissions', () => {
-    // This is what makes "every Linux account can sign in" safe: the default set
-    // can only ever touch the holder's own instance.
     expect(INSTANCE_PERMISSIONS).toContain('config.edit');
     expect(INSTANCE_PERMISSIONS).toContain('daemon.control');
     expect(INSTANCE_PERMISSIONS).toContain('backup.restore');

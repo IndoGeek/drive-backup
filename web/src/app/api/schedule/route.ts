@@ -14,11 +14,6 @@ export const runtime = 'nodejs';
 
 const SCHEDULE_FIELD_BY_KEY = new Map(SCHEDULE_FIELDS.map((f) => [f.key, f]));
 
-/**
- * Store times in one canonical form, exactly as the daemon does when it loads the
- * file. Otherwise "6:5" would be written as typed and shown back unchanged, while
- * the daemon ran it as 06:05 — the panel and the schedule would disagree on screen.
- */
 function normalizeScheduleValue(key: string, value: unknown): unknown {
   if (key === 'backup.time') return normalizeTime(value) ?? value;
   if (key === 'backup.times') {

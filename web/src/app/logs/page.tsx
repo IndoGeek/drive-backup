@@ -47,7 +47,6 @@ function human(bytes: number): string {
 
 const isErrorLog = (name: string) => /error/i.test(name);
 
-/** The one tab that is not a file: the privileged-action audit trail. */
 const AUDIT_TAB = 'audit';
 const isAuditTab = (id: string | undefined) => id === AUDIT_TAB;
 
@@ -55,7 +54,7 @@ export default function LogsPage() {
   const { loading: meLoading, can } = useMe();
   const [sources, setSources] = useState<LogSource[]>([]);
   const [activeId, setActiveId] = useState<string>('backup');
-  /** Remember the chosen file per tab. */
+
   const [selection, setSelection] = useState<Record<string, string>>({});
   const [content, setContent] = useState('');
   const [live, setLive] = useState(true);
@@ -75,7 +74,6 @@ export default function LogsPage() {
     void loadSources();
   }, [loadSources]);
 
-  // The audit trail is not a file: it is a tab of its own, for admins only.
   const canAudit = can('users.manage');
   const auditTabs: LogSource[] = canAudit
     ? [
@@ -91,21 +89,19 @@ export default function LogsPage() {
   const active = isAuditTab(activeId)
     ? auditTabs[0]
     : (sources.find((s) => s.id === activeId) ?? sources[0]);
-  // Placeholder tab so the bar renders while the first request is in flight.
+
   const tabs: LogSource[] = [...(sources.length
     ? sources
     : [{ id: 'backup', label: 'Backup', description: '', dir: '', files: [] }]), ...auditTabs];
   const files = active?.files ?? [];
-  // Derived, so a refresh doesn't clobber the user's choice; falls back to the
-  // newest file in the tab until they pick one.
+
   const selected = (active && selection[active.id]) || files[0]?.name || null;
 
-  // Open/close the stream when the tab, the file, or live mode changes.
   useEffect(() => {
     esRef.current?.close();
     esRef.current = null;
     setConnected(false);
-    // The audit tab is rendered by AuditPanel; it has no file and no stream.
+
     if (!active || !selected || isAuditTab(active.id)) {
       setContent('');
       return;
@@ -143,7 +139,6 @@ export default function LogsPage() {
     };
   }, [active, selected, live]);
 
-  // Keep the view scrolled to the newest lines.
   useEffect(() => {
     if (live && preRef.current) preRef.current.scrollTop = preRef.current.scrollHeight;
   }, [content, live]);
@@ -188,7 +183,7 @@ export default function LogsPage() {
         </div>
       </div>
 
-      {/* One tab per kind of log. */}
+      {}
       <div role="tablist" className="flex flex-wrap gap-1 border-b border-border">
         {tabs.map((s) => {
           const on = s.id === active?.id;

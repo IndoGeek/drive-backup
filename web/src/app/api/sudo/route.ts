@@ -4,22 +4,7 @@ import { authorizeSudo, clearSessionGrant, sudoStatus } from '@/lib/sudo';
 
 export const runtime = 'nodejs';
 
-/**
- * Elevation for the signed-in user, mirroring how sudo behaves on the server.
- *
- *  - `GET`    — can this account use sudo, does it need a password, and until when
- *               is the current elevation good for?
- *  - `POST`   — verify the sudo password once and open a grant for this session.
- *               Privileged routes then stop asking until it lapses.
- *  - `DELETE` — end it now, the equivalent of `sudo -k`.
- *
- * The password is verified against the account's real Linux hash and kept **in
- * this process's memory, scoped to this login** until it lapses. It is never
- * written to disk and never logged. Signing out drops it (see the logout route).
- */
 export async function GET(req: Request) {
-  // Any signed-in user may ask about their own elevation; elevation is only ever
-  // granted to the account making the request, never to someone named in a body.
   const g = guard(req, 'dashboard.view');
   if (!g.ok) return g.response;
   return NextResponse.json({ sudo: await sudoStatus(req, g.user.username) });
@@ -43,7 +28,7 @@ export async function POST(req: Request) {
       {
         error: result.error,
         sudo_required: true,
-        // Distinguishes "you may not elevate at all" from "that password was wrong".
+
         ...(result.status === 403 ? { sudo_denied: true } : {}),
       },
       {

@@ -1,14 +1,3 @@
-/**
- * Permissions are scoped, which matters in the multi-user model:
- *
- *  - `instance` permissions act only on the holder's *own* isolated instance —
- *    their config.yml, their logs, their daemon. Granting all of them to every
- *    user is safe, because no user can reach another user's files: the OS
- *    enforces that, since every command runs as that account.
- *  - `panel` permissions are global and privileged. `users.manage` decides who
- *    may use the panel at all; `binary.install` runs a build and a privileged
- *    install over the shared binary.
- */
 export const PERMISSIONS = [
   { key: 'dashboard.view', label: 'View dashboard, status and history', scope: 'instance' },
   { key: 'backup.run', label: 'Run backups, dry runs and compression tests', scope: 'instance' },
@@ -38,10 +27,6 @@ export type PermissionScope = (typeof PERMISSIONS)[number]['scope'];
 
 export const ALL_PERMISSIONS: Permission[] = PERMISSIONS.map((p) => p.key);
 
-/**
- * What a newly mirrored Linux account starts with: full control of its own
- * instance, and nothing global. An admin can restrict any of it afterwards.
- */
 export const INSTANCE_PERMISSIONS: Permission[] = PERMISSIONS.filter(
   (p) => p.scope === 'instance',
 ).map((p) => p.key);

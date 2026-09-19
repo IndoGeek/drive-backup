@@ -3,14 +3,6 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { envNumber, passwdWatchIntervalMs, sudoTimeoutMs, syncIntervalMs } from './panel';
 import { minUid } from './osusers';
 
-/**
- * Panel settings come from the environment, and an *empty* variable is not an
- * absent one: `Number('')` is 0, which is a legitimate value for some of these
- * settings. A pm2 ecosystem file that passes `X || ''` therefore turned "unset"
- * into a real 0 — which once meant sudo never remembered a password and every
- * service account became mirrorable. These pin the difference down.
- */
-
 const TOUCHED = [
   'BACKUP_MGR_SUDO_TIMEOUT_MS',
   'BACKUP_MGR_AUTO_SYNC_INTERVAL_MS',
@@ -55,8 +47,7 @@ describe('the elevation window', () => {
   it('defaults to sudo’s own 15 minutes when nothing is set', () => {
     setEnv('BACKUP_MGR_SUDO_TIMEOUT_MS', undefined);
     expect(sudoTimeoutMs()).toBe(15 * 60_000);
-    // The exact case that was broken: the ecosystem file used to define this as
-    // an empty string, which made the window 0 ms — a password prompt every time.
+
     setEnv('BACKUP_MGR_SUDO_TIMEOUT_MS', '');
     expect(sudoTimeoutMs()).toBe(15 * 60_000);
   });
@@ -96,13 +87,12 @@ describe('the other intervals', () => {
 
 describe('the pm2 ecosystem file', () => {
   it('omits blank variables instead of defining them as empty', () => {
-    // The root cause of the above: defining X as '' rather than leaving it out.
     for (const name of TOUCHED) setEnv(name, undefined);
     setEnv('BACKUP_MGR_SUDO_TIMEOUT_MS', '');
     setEnv('BACKUP_MGR_ADMIN_USER', '');
 
     const file = path.join(__dirname, '..', '..', '..', 'ecosystem.frontend.cjs');
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
+
     const cfg = require(file) as { apps: { env: Record<string, string> }[] };
     const env = cfg.apps[0]!.env;
 

@@ -47,8 +47,6 @@ export async function GET(req: Request) {
   const notReady = await requireProvisioned(inst);
   if (notReady) return notReady;
 
-  // Every command runs as the instance's own Linux user, against that user's
-  // config — so this reports only this instance's state.
   const res = await runCli(inst, ['status', '--json'], 30_000);
   const parsed = parseTrailingJson<StatusPayload>(res.stdout);
   if (!parsed) {

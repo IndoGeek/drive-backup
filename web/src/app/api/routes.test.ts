@@ -5,7 +5,7 @@ import type { NextResponse } from 'next/server';
 
 let adminCookie = '';
 let limitedCookie = '';
-/** Sudo-capable, but sudo would ask for a password here. */
+
 let sudoerCookie = '';
 let accountName = '';
 let accountUid = 0;
@@ -43,14 +43,10 @@ beforeAll(async () => {
   process.env.BACKUP_MGR_USERS_DB = path.join(dataDir, 'panel.db');
   process.env.BACKUP_MGR_SESSION_SECRET = 'test-secret';
   process.env.BACKUP_MGR_ADMIN_USER = account.name;
-  // Pin the failure paths so tests are deterministic and never run a real binary
-  // or spawn a real pm2 daemon as a side effect.
+
   process.env.BACKUP_MGR_BIN = '/nonexistent/backup-mgr';
   process.env.PM2_BIN = '/nonexistent/pm2';
 
-  // Admin comes from sudo on the server, so declare it: the panel's own account
-  // has NOPASSWD (no prompt anywhere), 'limited' has no sudo at all, and 'sudoer'
-  // has sudo that would ask for a password — which is what the popup flow needs.
   const { makeHash, useSudoFixture } = await import('@/lib/testhelp');
   useSudoFixture({
     [account.name]: { has_sudo: true, passwordless: true },
@@ -139,7 +135,7 @@ describe('user management', () => {
     expect(res.status).toBe(200);
     const data = await body<{ users: { username: string; instance: { root: string } }[] }>(res);
     expect(data.users.map((u) => u.username)).toContain('limited');
-    // Each row carries the account's own instance location.
+
     expect(data.users.find((u) => u.username === accountName)?.instance.root).toBe(instanceRoot);
   });
 
@@ -197,7 +193,7 @@ describe('instance lifecycle', () => {
   it('lets an admin act on another user’s instance', async () => {
     const { GET } = await import('@/app/api/status/route');
     const res = await GET(get('http://test/api/status?user=limited', adminCookie));
-    // Allowed through authorization; 'limited' simply has no instance yet.
+
     expect(res.status).toBe(409);
   });
 });
@@ -265,8 +261,7 @@ describe('rclone routes', () => {
 
   it('reports an unknown job id to an authorized user', async () => {
     const { GET } = await import('@/app/api/rclone/status/route');
-    // Another user's id resolves to "unknown" rather than "forbidden", so job ids
-    // cannot be probed for existence.
+
     const res = await GET(get('http://test/api/rclone/status?id=made-up', adminCookie));
     expect(res.status).toBe(404);
   });
@@ -302,15 +297,6 @@ describe('binary route (panel-level)', () => {
   });
 });
 
-/**
- * The mirror is what makes `useradd` the only step: these cover the routes that
- * drive it, and the guarantee that access follows the Linux account.
- */
-/**
- * Privileged work is authorized by the acting user's own sudo, exactly as the OS
- * defines it: NOPASSWD never asks, and a host that prompts is asked once and then
- * left alone for a while (see lib/sudo.ts).
- */
 describe('sudo elevation', () => {
   function patchPermissions(cookie: string, id: number) {
     return new Request('http://test/api/users', {
@@ -379,7 +365,7 @@ describe('sudo elevation', () => {
 
   it('gives each session its own elevation: one user’s grant is not another’s', async () => {
     const { PATCH } = await import('@/app/api/users/route');
-    // 'sudoer' is elevated; a different login of the same account is not.
+
     const { createSession } = await import('@/lib/session');
     const { getUserByName } = await import('@/lib/users');
     const other = getUserByName(SUDOER);
@@ -410,13 +396,11 @@ describe('sudo elevation', () => {
 
     const { POST: logout } = await import('@/app/api/auth/logout/route');
     expect((await logout(get('http://test/api/auth/logout', sudoerCookie))).status).toBe(200);
-    // Same cookie, but the grant died with the session — the way closing a shell
-    // ends an interactive sudo session.
+
     expect((await PATCH(patchPermissions(sudoerCookie, id))).status).toBe(428);
   });
 
   it('gates acting on another user’s instance, but not reading it', async () => {
-    // Reads stay open for an admin (no prompt just to look); writes do not.
     const { GET } = await import('@/app/api/config/route');
     expect((await GET(get(`http://test/api/config?user=limited`, sudoerCookie))).status).not.toBe(428);
 
@@ -470,8 +454,7 @@ describe('mirrored accounts', () => {
       kept: string[];
       failed: { username: string; error: string }[];
     }>(res);
-    // Whatever the outcome for each account (already set up, created, or refused
-    // by sudo), nobody may be silently skipped.
+
     const seen = new Set([...data.created, ...data.kept, ...data.failed.map((f) => f.username)]);
     expect(seen).toEqual(new Set([accountName, 'limited', SUDOER]));
   });
@@ -487,7 +470,7 @@ describe('mirrored accounts', () => {
       expect(res.status).toBe(503);
       const data = await body<{ error: string }>(res);
       expect(data.error).toMatch(/could not be read/i);
-      // The admin is still there: nothing was deleted on a failed read.
+
       const listed = await (await import('@/app/api/users/route')).GET(
         get('http://test/api/users', adminCookie),
       );
@@ -531,7 +514,7 @@ describe('mirrored accounts', () => {
     const { writePasswdFixture } = await import('@/lib/testhelp');
     const { resetOsUserCache } = await import('@/lib/osusers');
     const original = process.env.BACKUP_MGR_PASSWD_FILE;
-    // `userdel limited`, leaving only the account the panel itself runs as.
+
     process.env.BACKUP_MGR_PASSWD_FILE = writePasswdFixture([
       { name: accountName, uid: accountUid, gid: accountGid, home: accountHome },
     ]);
@@ -539,8 +522,7 @@ describe('mirrored accounts', () => {
     try {
       const { GET } = await import('@/app/api/status/route');
       const res = await GET(get('http://test/api/status', limitedCookie));
-      // The session cookie is still valid, but the identity behind it is gone —
-      // the OS owns who exists, so the very next request is refused.
+
       expect(res.status).toBe(401);
     } finally {
       process.env.BACKUP_MGR_PASSWD_FILE = original;

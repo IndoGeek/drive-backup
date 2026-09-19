@@ -67,9 +67,6 @@ export default function AuthPage() {
 
   const isDrive = target === 'primary' || backend === 'drive';
 
-  // Must match `google_drive.client_id` / `storage.secondary.client_id` in
-  // config.yml: drive.rs only passes client creds to rclone when they are
-  // non-empty, so a blank pair means rclone's own built-in client.
   const pasteCmd = pasteInfo?.client_id
     ? `rclone authorize "drive" "${pasteInfo.client_id}" "<client_secret>"`
     : 'rclone authorize "drive"';
@@ -83,10 +80,6 @@ export default function AuthPage() {
     return () => clearInterval(t);
   }, [job]);
 
-  /**
-   * The paste flow only works if the token was minted for the same OAuth client
-   * this remote will refresh with, so ask the server which one that is.
-   */
   useEffect(() => {
     if (!isDrive || method !== 'paste') return;
     let alive = true;

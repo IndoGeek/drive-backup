@@ -18,14 +18,6 @@ import {
   TR,
 } from '@/components/ui';
 
-/**
- * The privileged-action trail: who elevated, what changed, when.
- *
- * Unlike the other log tabs this is not a file being tailed — it is the panel's own
- * database — so it polls rather than streaming, and it is only offered to accounts
- * that may manage users.
- */
-
 type Entry = {
   id: number;
   at: string;
@@ -49,7 +41,6 @@ const OUTCOME: Record<string, Variant> = {
   failed: 'destructive',
 };
 
-/** One line describing the change, e.g. `target=bob permissions=["dashboard.view"]`. */
 function summarise(detail: Record<string, unknown>): string {
   const parts = Object.entries(detail)
     .filter(([, v]) => v !== null && v !== undefined && v !== '')
@@ -87,7 +78,7 @@ export function AuditPanel() {
 
   useEffect(() => {
     void load();
-    // Not a stream: the trail changes only when someone does something privileged.
+
     const timer = setInterval(() => void load(), 10_000);
     return () => clearInterval(timer);
   }, [load]);

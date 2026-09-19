@@ -2,12 +2,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 
-/**
- * The audit trail answers "who elevated, what changed, when" — so these cover the
- * record, the ordering, the filters, the cap, and the promise that recording can
- * never break the action it describes.
- */
-
 beforeAll(async () => {
   const { tmpDir } = await import('./testhelp');
   const dataDir = path.join(tmpDir('bm-audit-'), 'data');
@@ -71,8 +65,7 @@ describe('the audit trail', () => {
     const { entries, total } = listAudit({ limit: 100_000 });
     expect(total).toBeGreaterThanOrEqual(entries.length);
     expect(entries.length).toBeLessThanOrEqual(1000);
-    // A limit that is not a positive number is a caller mistake: too small means
-    // one row, too large means the cap, and nothing means the default page.
+
     expect(listAudit({ limit: -5 }).entries.length).toBe(1);
     expect(listAudit({ limit: 0 }).entries.length).toBe(total);
   });
@@ -87,7 +80,7 @@ describe('the audit trail', () => {
     expect(removed).toBe(before - 5);
     const after = listAudit({ limit: 1000 });
     expect(after.total).toBe(5);
-    // The survivors are the newest ones, which is the point of a trail.
+
     expect(after.entries[0].action).toBe('action 11');
     expect(pruneAudit(5)).toBe(0);
   });
@@ -97,8 +90,7 @@ describe('the audit trail', () => {
     const circular: Record<string, unknown> = {};
     circular.self = circular;
     const before = listAudit({ limit: 1000 }).total;
-    // A circular detail cannot be JSON-encoded; recording must swallow that rather
-    // than failing the privileged action it was describing.
+
     expect(() =>
       recordAudit({ username: 'alice', action: 'odd', outcome: 'allowed', detail: circular }),
     ).not.toThrow();

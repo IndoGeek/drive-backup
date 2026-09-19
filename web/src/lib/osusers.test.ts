@@ -32,7 +32,7 @@ describe('which accounts are mirrored', () => {
 
   it('skips service accounts: nologin shells and uid below the threshold', () => {
     const names = listOsUsers().map((u) => u.username);
-    // daemon and svc have no login shell; postgres has a shell but a service uid.
+
     expect(names).not.toContain('daemon');
     expect(names).not.toContain('svc');
     expect(names).not.toContain('postgres');
@@ -75,8 +75,6 @@ describe('getOsUser', () => {
   });
 
   it('rejects anything that is not a plain account name', () => {
-    // Login passes straight through to this, so path/traversal shapes must never
-    // reach a shell argument.
     expect(getOsUser('../../etc/passwd')).toBeNull();
     expect(getOsUser('alice bob')).toBeNull();
     expect(getOsUser('alice;id')).toBeNull();

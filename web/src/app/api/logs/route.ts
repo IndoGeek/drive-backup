@@ -13,16 +13,12 @@ export async function GET(req: Request) {
   if (!picked.ok) return picked.response;
   const inst = picked.inst;
 
-  // Not provisioned is fine here: backupLogDir falls back to the conventional
-  // location and simply reports no backup logs yet.
   const defs = logSourceDefs(inst, await backupLogDir(inst));
 
   const url = new URL(req.url);
   const sourceId = url.searchParams.get('source');
   const file = url.searchParams.get('file');
 
-  // No source given: hand back every kind of log with its files, so the Logs
-  // page needs a single request to render all its tabs.
   if (!sourceId) {
     return NextResponse.json({
       sources: await listLogSources(inst, defs),

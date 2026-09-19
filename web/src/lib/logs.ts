@@ -6,17 +6,6 @@ import { panelDir } from './panel';
 
 export type LogFile = { name: string; size: number; mtime: string };
 
-/**
- * A distinct kind of log. Two access modes matter now:
- *
- *  - `instance` logs belong to one Linux user (their backup output and their
- *    daemon's pm2 capture) and are reachable only by running as that account.
- *  - `panel` logs are the panel's own and are read directly.
- *
- * Several kinds can share one directory — a generated ecosystem puts the daemon's
- * pm2 capture in `<instance>/logs`, beside the backup logs — so each source
- * filters by filename rather than by directory alone.
- */
 export type LogSourceDef = {
   id: string;
   label: string;
@@ -28,19 +17,16 @@ export type LogSourceDef = {
 
 export type LogSourceView = Omit<LogSourceDef, 'match'> & { files: LogFile[] };
 
-/** The instance's backup log directory, from `logging.dir` in its config.yml. */
 export async function backupLogDir(inst: Instance): Promise<string> {
   try {
     const cfg = await readInstanceConfig(inst);
     const rel = getPath(cfg, 'logging.dir');
     return resolveInInstance(inst, typeof rel === 'string' && rel ? rel : './logs');
   } catch {
-    // Unprovisioned instance: fall back to the conventional location.
     return inst.logsDir;
   }
 }
 
-/** pm2's own stdout/stderr capture is `<name>.log` and `<name>-error.log`. */
 function isPm2Pair(name: string, app: string): boolean {
   return name === `${app}.log` || name === `${app}-error.log`;
 }
@@ -53,7 +39,7 @@ export function logSourceDefs(inst: Instance, backupDir: string): LogSourceDef[]
       description: 'Output of this instance’s backup runs and scheduler, one file per day.',
       access: 'instance',
       dir: backupDir,
-      // `!pm2` matters: the daemon's pm2 capture lives in this same directory.
+
       match: (n) => n.endsWith('.log') && !n.startsWith('pm2'),
     },
     {
@@ -75,7 +61,6 @@ export function logSourceDefs(inst: Instance, backupDir: string): LogSourceDef[]
   ];
 }
 
-/** Read the tail of a panel-owned log directly (the panel owns these files). */
 async function readPanelTail(full: string, maxBytes: number): Promise<string | null> {
   try {
     const st = await fs.stat(full);
@@ -110,7 +95,6 @@ async function listPanelLogs(dir: string): Promise<LogFile[]> {
   }
 }
 
-/** Every source with its current files, in one pass (one request for the UI). */
 export async function listLogSources(
   inst: Instance,
   defs: LogSourceDef[],
@@ -125,7 +109,7 @@ export async function listLogSources(
           (f) => (f.name.endsWith('.log') || f.name.endsWith('.txt')) && match(f.name),
         );
       }
-      // Newest first, so the most recent log is the default selection.
+
       files.sort((a, b) =>
         a.mtime === b.mtime ? b.name.localeCompare(a.name) : b.mtime.localeCompare(a.mtime),
       );
@@ -145,7 +129,7 @@ export async function readLog(
   name: string,
   maxBytes = 200_000,
 ): Promise<string | null> {
-  const safe = path.basename(name); // no traversal
+  const safe = path.basename(name);
   const full = path.join(def.dir, safe);
   if (def.access === 'panel') return readPanelTail(full, maxBytes);
   return readTailAs(inst, full, maxBytes);

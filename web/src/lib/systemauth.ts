@@ -2,29 +2,6 @@ import { execFile } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { getOsUser } from './osusers';
 
-/**
- * Verify a Linux account's password, so panel access is governed by the OS
- * account rather than a second password store. Locking an account with
- * `passwd -l` therefore locks the panel too, and there is no panel password to
- * leak or forget.
- *
- * How it works, and why:
- *
- *  - `/etc/shadow` is not readable by the panel's user, so the hash is read with
- *    `sudo -n getent shadow <user>`.
- *  - The hash is compared using the system's own crypt(3), not reimplemented in
- *    Node. Real accounts on a modern distro use yescrypt (`$y$`), which cannot be
- *    reproduced in JavaScript; delegating to crypt(3) also means sha512crypt and
- *    anything else the host supports just works.
- *  - Perl is preferred over Python because Python's `crypt` module is deprecated
- *    and removed in 3.13, while Perl's `crypt` is not going anywhere.
- *  - Nothing sensitive ever reaches argv — both the hash and the password travel
- *    on stdin, base64-encoded so newlines cannot break the framing. Process
- *    arguments are world-readable via `ps`.
- *  - crypt() is only run when a hash was actually retrieved, and never as root:
- *    sudo is used for exactly one read.
- */
-
 export type VerifyResult =
   | { ok: true }
   | {
@@ -77,13 +54,6 @@ function run(
   });
 }
 
-/**
- * Read the shadow hash for a user. Requires a passwordless sudo rule, because
- * /etc/shadow is not readable by the panel's user.
- *
- * BACKUP_MGR_SHADOW_FILE substitutes a file, which is how the tests exercise the
- * real crypt(3) path without root.
- */
 async function shadowHash(username: string): Promise<
   { ok: true; hash: string } | { ok: false; reason: 'sudo' | 'unknown-user'; message: string }
 > {
@@ -130,10 +100,6 @@ async function shadowHash(username: string): Promise<
   return { ok: true, hash };
 }
 
-/**
- * Compare `password` against a shadow hash using the host's crypt(3).
- * Returns null when neither perl nor python3 is usable.
- */
 async function cryptMatches(hash: string, password: string): Promise<boolean | null> {
   const payload = `${Buffer.from(hash).toString('base64')}\n${Buffer.from(password).toString(
     'base64',
@@ -147,19 +113,10 @@ async function cryptMatches(hash: string, password: string): Promise<boolean | n
     const out = res.stdout.trim();
     if (out === 'OK') return true;
     if (out === 'NO') return false;
-    // Anything else (missing interpreter, broken crypt module) -> try the next.
   }
   return null;
 }
 
-/**
- * Hashes that can never match, because there is no password to match against.
- *
- * shadow(5) uses `!` for a locked account and `*` for one that has no password at
- * all (or `!!` for a locked account that never had one). The distinction matters to
- * an operator: "locked" means `passwd -u` fixes it, "no password" means `passwd`
- * is required.
- */
 function unusableHash(hash: string): { reason: 'locked' | 'no-password'; message: string } | null {
   if (!hash || hash === 'x' || hash.startsWith('*')) {
     return {
@@ -176,16 +133,6 @@ function unusableHash(hash: string): { reason: 'locked' | 'no-password'; message
   return null;
 }
 
-// ---------------------------------------------------------------------------
-// Throttling
-//
-// System passwords are the only barrier in front of a privileged panel, and
-// crypt(3) gives us no server-side rate limiting. Failures are counted per
-// account+address with an exponential lockout. State is per process: it survives
-// between requests but not a restart, which is acceptable for a single-process
-// panel and documented in the README. Any success clears the counter.
-// ---------------------------------------------------------------------------
-
 const MAX_FAILURES = Number(process.env.BACKUP_MGR_MAX_LOGIN_FAILURES ?? 5);
 const BASE_LOCK_MS = 2_000;
 const MAX_LOCK_MS = 15 * 60_000;
@@ -201,7 +148,6 @@ export function resetThrottle(): void {
   attempts.clear();
 }
 
-/** Milliseconds remaining before another attempt is allowed (0 = allowed now). */
 export function throttleRemaining(key: string): number {
   const a = attempts.get(key);
   if (!a) return 0;
@@ -222,13 +168,8 @@ export function recordSuccess(key: string): void {
   attempts.delete(key);
 }
 
-/** Floor every attempt at a similar duration so reply time can't reveal whether a user exists. */
 const MIN_VERIFY_MS = Number(process.env.BACKUP_MGR_MIN_VERIFY_MS ?? 350);
 
-/**
- * Authenticate `username` against the Linux account database, then verify the
- * supplied password.
- */
 export async function verifySystemPassword(
   username: string,
   password: string,
@@ -242,8 +183,6 @@ export async function verifySystemPassword(
     return result;
   };
 
-  // Only mirrored accounts may authenticate — an account that is not eligible to
-  // appear in the panel must not be probeable through it either.
   const osUser = getOsUser(username);
   if (!osUser) {
     return settle({ ok: false, reason: 'unknown-user', message: 'Invalid username or password' });

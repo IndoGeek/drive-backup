@@ -18,14 +18,6 @@ import { Button } from '@/components/ui';
 import { useMe } from '@/lib/use-me';
 import { useSudo } from '@/lib/sudo-client';
 
-/**
- * The header, plus the one piece of state that changes what happens next: whether a
- * sudo prompt is coming.
- *
- * Layout: a wrapping row rather than a fixed one — the brand and the account
- * controls sit on the first line and the nav drops to its own full-width,
- * horizontally scrollable line below `lg`. Icons stay, labels return at `sm`.
- */
 export function Nav() {
   const pathname = usePathname();
   const { me, loading, can } = useMe();
@@ -72,7 +64,7 @@ export function Nav() {
           </Button>
         </div>
 
-        {/* Its own line on small screens; inline from lg up. */}
+        {}
         <nav
           className={cn(
             'order-last -mb-2 flex w-full items-center gap-1 overflow-x-auto pb-2',
@@ -104,12 +96,6 @@ export function Nav() {
   );
 }
 
-/**
- * Whether privileged work will ask for a password.
- *
- * Clicking it does the useful thing for its state: ask now (rather than being
- * surprised mid-task), or end elevation early like `sudo -k`.
- */
 function ElevationChip({
   sudo,
   onElevate,

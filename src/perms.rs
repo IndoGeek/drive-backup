@@ -3,21 +3,16 @@ use crate::logger::Logger;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The user that owns this deployment (the one the daemon/panel runs as).
-/// Defaults to `$USER`; the panel can override it with `--user`.
 pub fn current_user() -> Option<String> {
     std::env::var("USER")
         .ok()
         .filter(|u| !u.trim().is_empty())
 }
 
-/// Absolute path of the directory that is actually archived.
 pub fn source_dir(cfg: &Config) -> PathBuf {
     cfg.resolve(&cfg.inner.backup.path)
 }
 
-/// Locate the bundled ACL helper next to the config file (config.yml lives in
-/// the project root, the helper in `scripts/`).
 fn script_path(cfg: &Config) -> Option<PathBuf> {
     [
         cfg.base_dir.join("scripts/grant-access.sh"),
@@ -36,13 +31,6 @@ fn readable(p: &Path) -> bool {
     std::fs::read_dir(p).is_ok()
 }
 
-/// Ensure `user` can read + traverse the configured backup source directory.
-///
-/// This is the "first run / panel button" permission setup: if the directory is
-/// already readable nothing happens, otherwise the bundled
-/// `scripts/grant-access.sh` is invoked (directly when root, through
-/// passwordless `sudo -n` otherwise) and access is re-checked afterwards. All
-/// ACL logic therefore stays in one place.
 pub fn ensure_access(cfg: &Config, user: &str, logger: &Logger) -> Result<(), String> {
     let dest = source_dir(cfg);
     if readable(&dest) {
@@ -78,7 +66,6 @@ pub fn ensure_access(cfg: &Config, user: &str, logger: &Logger) -> Result<(), St
             .arg(&dest_s)
             .status()
     } else {
-        // Never block waiting for a password: require a non-interactive sudo.
         let sudo_ok = Command::new("sudo")
             .args(["-n", "true"])
             .status()

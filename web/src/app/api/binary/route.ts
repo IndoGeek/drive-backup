@@ -16,12 +16,8 @@ import {
 export const runtime = 'nodejs';
 
 export type BinaryPayload = {
-  /**
-   * The shared binary every instance runs. Installed once and read-only for
-   * users; per-user isolation comes from who runs it, not from separate copies.
-   */
   binary: string;
-  /** Absolute path of the binary that would actually run, if resolvable. */
+
   resolved_path: string | null;
   file: { size: number; mtime: string } | null;
   installed: BuildInfo | null;
@@ -41,7 +37,6 @@ function git(args: string[], cwd: string): Promise<string | null> {
   });
 }
 
-/** Commit of the served checkout, matching build.rs (`-dirty` for a dirty tree). */
 async function expectedCommit(root: string): Promise<string | null> {
   const sha = await git(['rev-parse', '--short', 'HEAD'], root);
   if (!sha) return null;
@@ -50,16 +45,12 @@ async function expectedCommit(root: string): Promise<string | null> {
 }
 
 export async function GET(req: Request) {
-  // The binary is shared, so this is the same answer for everyone — and it is not
-  // instance data, so it needs no per-user resolution or provisioning check.
   const g = guard(req, 'dashboard.view');
   if (!g.ok) return g.response;
 
   const root = checkoutRoot();
   const bin = binaryPath();
 
-  // Panel-level: asked of the binary directly, not through any user's instance.
-  // `version --json` exits before config loading, so this is safe and cheap.
   const res = await runBinary(['version', '--json'], 15_000);
   const installed = parseTrailingJson<BuildInfo>(res.stdout);
 

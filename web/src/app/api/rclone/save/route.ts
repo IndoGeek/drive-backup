@@ -48,7 +48,6 @@ export async function POST(req: Request) {
   }
 
   try {
-    // Written into this instance's config.yml, as its owner, mode 0600.
     await mutateInstanceConfig(inst, (doc) => {
       doc.setIn([...path, 'refresh_token'], refresh);
       doc.setIn([...path, 'access_token'], access);
@@ -61,7 +60,6 @@ export async function POST(req: Request) {
     );
   }
 
-  // Do not echo the token back to the client.
   return NextResponse.json({
     ok: true,
     target,

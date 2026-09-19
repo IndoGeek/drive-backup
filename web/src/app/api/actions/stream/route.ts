@@ -4,22 +4,9 @@ import { prepareAction, type ActionOptions } from '@/lib/actions';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
-// A full run can take hours; the stream is kept open for it.
+
 export const maxDuration = 7200;
 
-/**
- * Run an action and stream its output as it happens.
- *
- * A backup can run for a long time, so waiting for the process to finish before
- * showing anything makes the panel look broken — the very complaint this fixes.
- * Output is written as newline-delimited JSON (`{type, …}`) rather than SSE because
- * the request has a body (an action plus its options) and EventSource cannot POST.
- *
- * `proxy_buffering off` plus the `X-Accel-Buffering: no` header keep nginx from
- * holding the chunks back until the end, which would defeat the point.
- *
- * Nothing is buffered server-side either: the loop streams the child's own pipes.
- */
 export async function POST(req: Request) {
   let body: { action?: string; options?: ActionOptions } | null = null;
   try {
@@ -43,7 +30,6 @@ export async function POST(req: Request) {
         try {
           controller.enqueue(encoder.encode(`${JSON.stringify(message)}\n`));
         } catch {
-          // The client went away; the exit handler below does the cleanup.
           closed = true;
         }
       };
@@ -53,7 +39,6 @@ export async function POST(req: Request) {
         try {
           controller.close();
         } catch {
-          // already closed
         }
       };
 
@@ -68,7 +53,6 @@ export async function POST(req: Request) {
         return;
       }
 
-      // A run that hangs must not pin the connection forever.
       const timer = setTimeout(() => {
         send({ type: 'stderr', data: `\n[timed out after ${timeout / 1000}s]\n` });
         child.kill('SIGTERM');
@@ -90,8 +74,6 @@ export async function POST(req: Request) {
         finish();
       });
 
-      // If the browser hangs up (or the tab is closed), stop the backup rather
-      // than leaving an orphan running with nobody watching it.
       req.signal.addEventListener('abort', () => {
         clearTimeout(timer);
         if (child.exitCode === null) child.kill('SIGTERM');

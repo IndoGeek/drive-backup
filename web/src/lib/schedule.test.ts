@@ -1,12 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { cleanTimes, evenSpacing, fmtMinute, minuteOf, normalizeTime } from './schedule';
 
-/**
- * The Dashboard previews these times, and the daemon fires them. A disagreement
- * would be invisible until a backup failed to happen, so the arithmetic is pinned
- * to the same rule as `scheduler::schedule_minutes` (src/scheduler.rs).
- */
-
 describe('normalizeTime', () => {
   it('accepts what people type and stores one form', () => {
     expect(normalizeTime('03:30')).toBe('03:30');
@@ -60,8 +54,6 @@ describe('cleanTimes', () => {
   });
 
   it('refuses the whole list when one entry is not a time', () => {
-    // Saving the good entries and dropping the bad one would quietly change the
-    // schedule the user just described.
     expect(cleanTimes(['03:30', '25:00'])).toBeNull();
     expect(cleanTimes([])).toEqual([]);
   });

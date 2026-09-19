@@ -2,8 +2,6 @@ import * as React from 'react';
 import { cva, type VariantProps } from 'class-variance-authority';
 import { cn } from '@/lib/cn';
 
-/* ----------------------------- Button ----------------------------- */
-
 const buttonVariants = cva(
   'inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50',
   {
@@ -34,8 +32,6 @@ export function Button({ className, variant, size, ...props }: ButtonProps) {
   return <button className={cn(buttonVariants({ variant, size }), className)} {...props} />;
 }
 
-/* ------------------------------ Card ------------------------------ */
-
 export function Card({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
   return (
     <div
@@ -64,8 +60,6 @@ export function CardContent({ className, ...props }: React.HTMLAttributes<HTMLDi
 export function CardFooter({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
   return <div className={cn('flex items-center p-5 pt-0', className)} {...props} />;
 }
-
-/* --------------------------- Form fields -------------------------- */
 
 export function Label({ className, ...props }: React.LabelHTMLAttributes<HTMLLabelElement>) {
   return (
@@ -140,8 +134,6 @@ export function Switch({
   );
 }
 
-/* ----------------------------- Badge ------------------------------ */
-
 const badgeVariants = cva(
   'inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium',
   {
@@ -165,8 +157,6 @@ export interface BadgeProps
 export function Badge({ className, variant, ...props }: BadgeProps) {
   return <span className={cn(badgeVariants({ variant }), className)} {...props} />;
 }
-
-/* ----------------------------- Table ------------------------------ */
 
 export function Table({ className, ...props }: React.TableHTMLAttributes<HTMLTableElement>) {
   return (

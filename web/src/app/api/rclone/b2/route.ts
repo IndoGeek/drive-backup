@@ -34,8 +34,6 @@ export async function POST(req: Request) {
   const notReady = await requireProvisioned(inst);
   if (notReady) return notReady;
 
-  // Runs as the instance user, so credentials land in THEIR rclone config (their
-  // HOME), never in the panel's or another user's.
   const res = await createB2Remote(inst, { remote, account, key });
   if (!res.ok) {
     return NextResponse.json(
@@ -44,9 +42,6 @@ export async function POST(req: Request) {
     );
   }
 
-  // backup-mgr requires secondary.dir and secondary.retention to parse the
-  // config, so carry over the existing values (or sensible defaults) instead of
-  // writing a partial section.
   let dir = 'backup';
   let retention = 3;
   try {
@@ -56,7 +51,6 @@ export async function POST(req: Request) {
     if (secondary && typeof secondary.dir === 'string' && secondary.dir) dir = secondary.dir;
     if (secondary && typeof secondary.retention === 'number') retention = secondary.retention;
   } catch {
-    // config missing/partial: defaults are fine
   }
 
   try {

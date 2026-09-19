@@ -32,8 +32,6 @@ export async function POST(req: Request) {
   if (notReady) return notReady;
 
   try {
-    // rclone runs as this instance's user, so the browser callback and the token it
-    // writes belong to that account's instance.
     const job = startAuth(inst, {
       method,
       clientId: body?.clientId?.trim() || undefined,

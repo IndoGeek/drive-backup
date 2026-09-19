@@ -5,7 +5,6 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// Extension (including leading dot) for a compression type.
 pub fn extension_for(compression: &str) -> Option<&'static str> {
     match compression {
         "tar" => Some(".tar"),
@@ -75,7 +74,6 @@ fn require_binary(bin: &str, must: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// Compress the *contents* of src_dir (or just sub_dir inside it) into dst_file.
 pub fn compress_dir(
     src_dir: &Path,
     sub_dir: Option<&Path>,
@@ -134,9 +132,7 @@ pub fn compress_dir(
         };
         let mut args: Vec<String> = flag.split_whitespace().map(String::from).collect();
         args.push(partial.to_string_lossy().to_string());
-        // Skip unreadable files (e.g. transient process-private files) instead of
-        // failing the whole backup. Any skipped files are reported as warnings
-        // below. This is what lets the tool run as a non-root user.
+
         args.push("--ignore-failed-read".to_string());
         for p in excludes {
             args.push(format!("--exclude={}", p));
@@ -179,7 +175,6 @@ pub fn compress_dir(
     Ok(size)
 }
 
-/// Symmetric gpg encryption: <in> -> <in>.gpg, removing the plaintext afterwards.
 pub fn encrypt_gpg(input: &Path, passphrase: &str, cipher: &str, logger: &Logger) -> Result<PathBuf, String> {
     let out = input.with_extension(format!(
         "{}.gpg",
@@ -223,7 +218,6 @@ pub fn encrypt_gpg(input: &Path, passphrase: &str, cipher: &str, logger: &Logger
     Ok(out)
 }
 
-/// Decrypt a .gpg file back to plaintext <in without .gpg>.
 pub fn decrypt_gpg(input: &Path, passphrase: &str, out: &Path, logger: &Logger) -> Result<(), String> {
     require_binary("gpg", true)?;
     logger.info(&format!("decrypting {} -> {}", input.display(), out.display()));
@@ -260,7 +254,6 @@ pub fn decrypt_gpg(input: &Path, passphrase: &str, out: &Path, logger: &Logger) 
     Ok(())
 }
 
-/// Simple glob matcher supporting `*` and `?`.
 fn glob_match(s: &[char], p: &[char]) -> bool {
     match (s.first(), p.first()) {
         (None, None) => true,
@@ -289,7 +282,6 @@ fn excluded(path: &Path, root: &Path, excludes: &[String]) -> bool {
     })
 }
 
-/// Recursively estimate total size of a directory, skipping excluded entries.
 pub fn estimate_size(dir: &Path, excludes: &[String]) -> Result<u64, String> {
     fn walk(p: &Path, root: &Path, ex: &[String], out: &mut u64) -> Result<(), String> {
         for entry in std::fs::read_dir(p).map_err(|e| format!("cannot read {}: {e}", p.display()))? {
@@ -338,8 +330,6 @@ pub fn human_size(bytes: u64) -> String {
     }
 }
 
-/// Prune the local staging dir, keeping only the `keep` newest archives matching
-/// the given extension. Returns removed file paths.
 pub fn prune_local(dir: &Path, ext: &str, keep: usize, logger: &Logger) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();

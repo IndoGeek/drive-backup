@@ -27,16 +27,12 @@ use crate::state::RunState;
 
 const LOCK_NAME: &str = ".run.lock";
 
-/// Build provenance, baked in at compile time by build.rs. The web panel reads
-/// these over `status --json` / `version --json` to spot a stale installed
-/// binary (e.g. /usr/local/bin/backup-mgr predating a rebuild).
 const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
 const BUILD_COMMIT: &str = env!("BUILD_GIT_COMMIT");
 const BUILD_TIMESTAMP: &str = env!("BUILD_TIMESTAMP");
 
 const USAGE: &str = "Usage:\n  backup-mgr [daemon]\n  backup-mgr run [--world] [--no-upload|--keep-local|--no-ptero|--dry-run|--force]\n  backup-mgr test-compress\n  backup-mgr restore [<file> [target-dir]] [--force]\n  backup-mgr restore --json\n  backup-mgr check [file]\n  backup-mgr history [N]\n  backup-mgr remote-auth\n  backup-mgr status [--json]\n  backup-mgr fix-perms [--user <name>]\n  backup-mgr version [--json]\n  backup-mgr reset\n  [--config <path>]";
 
-/// The build stamp as JSON, shared by `version --json` and `status --json`.
 fn build_json() -> serde_json::Value {
     serde_json::json!({
         "name": env!("CARGO_PKG_NAME"),
@@ -83,11 +79,6 @@ mod path_guard {
     }
 }
 
-/// Default config location: `./config.yml` relative to the working directory.
-///
-/// Every real entry point passes `--config <path>` explicitly (the pm2 unit and
-/// the web panel both do); this is only the fallback for a bare
-/// `backup-mgr <command>`, so it must not hardcode any particular install path.
 fn default_config_path() -> PathBuf {
     PathBuf::from("config.yml")
 }
@@ -309,13 +300,11 @@ fn run_backup(
         base_name
     ));
 
-    // ---------- preflight: disk space ----------
     let est_root = match sub_dir {
         Some(s) => src.join(s),
         None => src.clone(),
     };
-    // On the first run (or whenever the source becomes unreadable) try to fix
-    // the permissions for the current user automatically before giving up.
+
     let mut tried_perm_fix = false;
     let estimated = loop {
         match backup::estimate_size(&est_root, &b.exclude_patterns) {
@@ -389,9 +378,6 @@ fn run_backup(
         backup::human_size(free)
     ));
 
-    // ---------- pterodactyl pre-backup (save + optional graceful shutdown) ----------
-    // `server_guard` restarts the server on Drop, so it comes back up on every
-    // possible exit path (success, failure, early return) automatically.
     let mut server_guard: Option<ptero::PteroGuard<'_>> = None;
     if opts.ptero {
         if opts.dry_run {
@@ -413,7 +399,6 @@ fn run_backup(
         }
     }
 
-    // ---------- archive ----------
     if !opts.dry_run {
         st.stage = "compressing".into();
         st.save(state_file)?;
@@ -441,7 +426,6 @@ fn run_backup(
         return Ok(());
     }
 
-    // ---------- encrypt ----------
     let artifact = if encrypted {
         st.stage = "encrypting".into();
         st.save(state_file)?;
@@ -458,7 +442,6 @@ fn run_backup(
     };
     let upload_size = std::fs::metadata(&artifact).map(|m| m.len()).unwrap_or(0);
 
-    // ---------- no-upload mode (testing) ----------
     if !opts.upload {
         if !opts.keep_local {
             let _ = std::fs::remove_file(&artifact);
@@ -474,7 +457,6 @@ fn run_backup(
         return Ok(());
     }
 
-    // ---------- upload orchestration ----------
     st.stage = "uploading".into();
     st.save(state_file)?;
 
@@ -586,7 +568,6 @@ fn run_backup(
         logger.warn(&format!("primary remote failed; backup uploaded to fallback remote {}", fw));
     }
 
-    // ---------- cleanup local ----------
     st.stage = "cleanup".into();
     st.save(state_file)?;
     if !opts.keep_local {
@@ -597,12 +578,10 @@ fn run_backup(
     }
     backup::prune_local(&local_dir, prune_ext, b.max_local_backups, logger);
 
-    // ---------- restart server (if it was stopped for this backup) ----------
     if let Some(g) = server_guard.as_mut() {
         g.restart_now();
     }
 
-    // ---------- finalize ----------
     let duration = start_inst.elapsed();
     let finished = Utc::now().to_rfc3339();
     st.mark_ok(finished.clone());
@@ -661,19 +640,10 @@ fn fail(
     Err(err.to_string())
 }
 
-// ---------------------------------------------------------------------------
-// scheduling
-// ---------------------------------------------------------------------------
-
 fn parse_minute(s: &str) -> Option<u32> {
     scheduler::parse_time(s)
 }
 
-/// When the daily (full) backups run.
-///
-/// `backup.times` wins when it is set — those are exact wall-clock times, which is
-/// what "two backups a day at 03:30 and 15:30" means. Otherwise the historical
-/// rule applies: `backups_per_day` slots evenly spaced from `backup.time`.
 fn full_minutes(cfg: &Config) -> Vec<u32> {
     schedule_for(
         &cfg.inner.backup.times,
@@ -682,7 +652,6 @@ fn full_minutes(cfg: &Config) -> Vec<u32> {
     )
 }
 
-/// The daily run times, given the two ways of describing them.
 fn schedule_for(times: &[String], time: &str, per_day: u32) -> Vec<u32> {
     let explicit: Vec<u32> = times
         .iter()
@@ -824,10 +793,6 @@ fn daemon(cfg: &Config, logger: &Logger) -> Result<(), String> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// commands
-// ---------------------------------------------------------------------------
-
 fn cmd_remote_auth(cfg: &Config, cfg_path: &Path, logger: &Logger) -> Result<(), String> {
     for (idx, r) in drive::active_remotes(cfg).into_iter().enumerate() {
         drive::ensure_remote_section(&r, logger)?;
@@ -849,10 +814,6 @@ fn cmd_remote_auth(cfg: &Config, cfg_path: &Path, logger: &Logger) -> Result<(),
         }
         logger.info(&format!("rclone remote '{}:' authenticated", r.remote));
 
-        // Persist the freshly-issued token back into config.yml so the next
-        // run does not clobber rclone.conf with the previous (revoked) token.
-        // Only drive remotes carry the JSON token we can round-trip; others
-        // (e.g. b2) have no token section, so skip them gracefully.
         match drive::read_config_token(&r) {
             Ok(creds) if !creds.refresh_token.trim().is_empty() => {
                 match idx {
@@ -890,7 +851,6 @@ fn cmd_status(cfg: &Config, logger: &Logger, limit: Option<usize>) -> Result<(),
     Ok(())
 }
 
-/// Machine-readable status for the web panel.
 fn cmd_status_json(cfg: &Config) -> Result<(), String> {
     let state_file = cfg.resolve(&cfg.inner.state.file);
     let st = RunState::load(&state_file);
@@ -931,8 +891,7 @@ fn cmd_status_json(cfg: &Config) -> Result<(), String> {
             "compression": b.compression,
             "time": b.time,
             "backups_per_day": b.backups_per_day,
-            // The exact times this build will run at, so the panel can show what
-            // the daemon really does rather than only what config.yml says.
+
             "times": b.times,
             "schedule": full_minutes(cfg).iter().map(|&m| fmt_minute(m)).collect::<Vec<_>>(),
             "timezone": cfg.inner.timezone,
@@ -953,8 +912,6 @@ fn cmd_status_json(cfg: &Config) -> Result<(), String> {
     Ok(())
 }
 
-/// Apply the ACL / permission setup for `user` so non-root backups can read the
-/// source directory. Reuses scripts/grant-access.sh.
 fn cmd_fix_perms(cfg: &Config, logger: &Logger, user: Option<String>) -> Result<(), String> {
     let user = user
         .or_else(perms::current_user)
@@ -998,7 +955,6 @@ fn remote_dir_names(cfg: &Config) -> Vec<String> {
     names
 }
 
-/// Machine-readable list of available archives (remotes + local staging).
 fn cmd_restore_list_json(cfg: &Config) -> Result<(), String> {
     let mut items: Vec<serde_json::Value> = Vec::new();
     for r in drive::active_remotes(cfg) {
@@ -1070,7 +1026,6 @@ fn cmd_restore(cfg: &Config, logger: &Logger, args: &[String]) -> Result<(), Str
     let target = cfg.resolve(&target_str);
 
     if let Err(e) = cmd_restore_do(cfg, logger, file, &target, force) {
-        // failed restore attempt
         let size = std::fs::metadata(target.join(file)).map(|m| m.len()).unwrap_or(0);
         notify::send(
             &cfg.inner.notifications.discord_webhook,
@@ -1099,14 +1054,6 @@ fn cmd_restore(cfg: &Config, logger: &Logger, args: &[String]) -> Result<(), Str
     Ok(())
 }
 
-/// Integrity gate for restore. Compares an observed MD5 against the manifest.
-///
-/// * `Ok(true)`  – hashes match, proceed normally.
-/// * `Ok(false)` – hashes differ but `force` was given, proceed under protest.
-/// * `Err(..)`   – hashes differ and no override, the restore must abort.
-///
-/// Kept as a pure function so the restore safety rule is unit-testable without
-/// a live remote or rclone.
 fn restore_hash_gate(
     file: &str,
     stage: &str,
@@ -1128,7 +1075,6 @@ fn restore_hash_gate(
 }
 
 fn cmd_restore_do(cfg: &Config, logger: &Logger, file: &str, target: &Path, force: bool) -> Result<(), String> {
-    // find the file on a remote
     let mut chosen: Option<Remote> = None;
     for r in drive::active_remotes(cfg) {
         if let Ok(files) = drive::list_backups(&r) {
@@ -1144,9 +1090,6 @@ fn cmd_restore_do(cfg: &Config, logger: &Logger, file: &str, target: &Path, forc
     let r = chosen.unwrap();
     std::fs::create_dir_all(target).map_err(|e| e.to_string())?;
 
-    // Verify against the manifest before downloading. A mismatch means the
-    // remote copy differs from what was recorded at upload time, so abort
-    // instead of restoring a possibly corrupt/tampered archive.
     if let Some(d) = db() {
         if let Some(m) = d.manifest(file) {
             match drive::remote_md5(&r, file) {
@@ -1175,8 +1118,6 @@ fn cmd_restore_do(cfg: &Config, logger: &Logger, file: &str, target: &Path, forc
     let raw = staging.join(file);
     drive::download_file(&r, file, &raw, logger)?;
 
-    // Verify the bytes we actually downloaded against the recorded manifest
-    // hash before touching the plaintext/extraction path.
     if let Some(m) = db().and_then(|d| d.manifest(file)) {
         match drive::local_md5(&raw) {
             Ok(local_hash) => {
@@ -1400,8 +1341,6 @@ fn main() {
         i += 1;
     }
 
-    // `version` / `--help` must work before (and without) a config file: they
-    // must not create config.yml as a side effect, nor fail when it is absent.
     match cmd.as_str() {
         "--version" | "-V" | "version" => {
             let json = rest.iter().any(|r| r == "--json");
@@ -1421,8 +1360,6 @@ fn main() {
     }
 
     let cfg = match (|| -> Result<Config, String> {
-        // Per-user bootstrap log dir (e.g. /tmp/backup-mgr-alice) so the
-        // pre-config phase never collides with another user's files.
         let tmp_dir = std::env::temp_dir().join(format!(
             "backup-mgr-{}",
             std::env::var("USER").unwrap_or_else(|_| "unknown".into())
@@ -1451,13 +1388,11 @@ fn main() {
         std::fs::create_dir_all(parent).ok();
     }
 
-    // metrics endpoint
     if cfg.inner.metrics.enabled {
         let m = METRICS.get_or_init(metrics::Metrics::new);
         m.serve(&cfg.inner.metrics.host, cfg.inner.metrics.port, &logger, cmd == "daemon");
     }
 
-    // sqlite history
     let db_path = cfg.resolve(&cfg.inner.database.file);
     match db::Db::open(&db_path) {
         Ok(d) => {
@@ -1564,7 +1499,6 @@ mod tests {
 
     #[test]
     fn schedule_without_times_keeps_the_even_spacing_rule() {
-        // Unchanged behaviour: per_day slots anchored at `time`.
         assert_eq!(schedule_for(&[], "03:30", 1), vec![210]);
         assert_eq!(schedule_for(&[], "03:30", 2), vec![210, 930]);
         assert_eq!(schedule_for(&[], "03:30", 4), vec![210, 570, 930, 1290]);
@@ -1573,7 +1507,7 @@ mod tests {
     #[test]
     fn explicit_times_are_the_schedule() {
         let times = vec!["15:30".to_string(), "03:30".to_string()];
-        // Sorted, so the daemon's log and the panel agree.
+
         assert_eq!(schedule_for(&times, "03:30", 1), vec![210, 930]);
     }
 
@@ -1594,7 +1528,6 @@ mod tests {
         let times = vec!["nope".to_string()];
         assert_eq!(schedule_for(&times, "03:30", 2), vec![210, 930]);
     }
-
 
     #[test]
     fn restore_gate_passes_on_matching_hash() {

@@ -2,13 +2,6 @@ import path from 'node:path';
 import { existsAs, runAs, type Instance } from './instance';
 import { pm2Path } from './panel';
 
-/**
- * Each user gets their own pm2 daemon, selected by PM2_HOME (see
- * instance.pm2Home) and run as their own account. That is what makes `pm2
- * restart` in one user's panel touch only their own app — there is no shared
- * process table to fight over, and no user can stop someone else's backups.
- */
-
 export type Pm2Result = {
   ok: boolean;
   code: number | null;
@@ -24,13 +17,13 @@ function pm2(inst: Instance, args: string[], timeoutMs = 30_000): Promise<Pm2Res
 export type DaemonStatus = {
   available: boolean;
   name: string;
-  /** pm2 status: online | stopped | errored | not-managed */
+
   state?: string;
   pid?: number;
   restarts?: number;
   uptime?: number;
   memory?: number;
-  /** The instance has no generated ecosystem file yet. */
+
   provisioned: boolean;
   error?: string;
 };
@@ -46,8 +39,6 @@ export async function daemonStatus(inst: Instance): Promise<DaemonStatus> {
   const base = { name: inst.pm2Name, provisioned };
 
   if (!res.ok) {
-    // A missing pm2 for this account is reported as an error, not as "no daemon":
-    // without pm2 the panel cannot start backups at all.
     return {
       ...base,
       available: false,
@@ -71,7 +62,7 @@ export async function daemonStatus(inst: Instance): Promise<DaemonStatus> {
     state: String(env.status ?? 'unknown'),
     pid: typeof app.pid === 'number' ? app.pid : undefined,
     restarts: typeof env.restart_time === 'number' ? env.restart_time : undefined,
-    // pm_uptime is the start timestamp; report it as a duration from now.
+
     uptime:
       typeof env.pm_uptime === 'number' ? Math.max(0, Date.now() - env.pm_uptime) : undefined,
     memory: typeof app.memory === 'number' ? app.memory : undefined,
@@ -84,7 +75,7 @@ export async function daemonAction(inst: Instance, action: DaemonAction): Promis
   switch (action) {
     case 'start': {
       const ecosystem = path.join(inst.root, 'ecosystem.config.cjs');
-      // Without this check a missing instance produces an opaque pm2 error.
+
       if (!(await existsAs(inst, ecosystem))) {
         return {
           ok: false,

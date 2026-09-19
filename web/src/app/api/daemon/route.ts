@@ -18,8 +18,7 @@ export async function GET(req: Request) {
   const inst = picked.inst;
 
   const status = await daemonStatus(inst);
-  // Each instance has its own pm2 daemon and app name, so this reports — and can
-  // only affect — the caller's own backups.
+
   return NextResponse.json({
     ...status,
     instance: instanceView(inst),

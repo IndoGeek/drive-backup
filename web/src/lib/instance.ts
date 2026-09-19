@@ -15,33 +15,21 @@ import {
   pm2Path,
 } from './panel';
 
-/**
- * One user's backup world: their own config.yml, logs, archives, history, state,
- * rclone config and pm2 daemon. Nothing here is shared with another user, and
- * every command runs as that Linux account — so the OS enforces the isolation,
- * not the panel.
- *
- * The panel itself is a single privileged service. It never reads an instance's
- * files directly: config.yml is 0600 and owned by the user, so all access goes
- * through `sudo -u <user>`. A bug in a route therefore cannot read another
- * user's OAuth token or gpg passphrase.
- */
-
 export type Instance = {
   osUser: string;
   uid: number;
   gid: number;
   home: string;
-  /** Directory holding config.yml, logs/, backup/, history.db, state.json. */
+
   root: string;
   configPath: string;
   logsDir: string;
   backupDir: string;
   historyDb: string;
   stateFile: string;
-  /** pm2 application name for this instance's daemon. */
+
   pm2Name: string;
-  /** Separate pm2 daemon per user, so `pm2 restart` only touches their own app. */
+
   pm2Home: string;
   rcloneConfig: string;
 };
@@ -52,7 +40,6 @@ function expandHome(p: string, home: string): string {
   return p;
 }
 
-/** Resolve the instance for an OS user, applying data/instances.yml overrides. */
 export function instanceFor(username: string): Instance | null {
   const osUser = getOsUser(username);
   if (!osUser) return null;
@@ -79,36 +66,23 @@ export function instanceFor(username: string): Instance | null {
   };
 }
 
-/** True when the instance belongs to a different account than the panel's. */
 export function needsSudo(inst: Instance): boolean {
   return typeof process.getuid === 'function' && process.getuid() !== inst.uid;
 }
 
-/**
- * PATH for instance commands. The panel's own PATH is appended so `pm2`,
- * `rclone` and `backup-mgr` resolve exactly as they do for the deploy user,
- * while the standard system locations come first.
- */
 function childPath(): string {
   const base = ['/usr/local/sbin', '/usr/local/bin', '/usr/sbin', '/usr/bin', '/sbin', '/bin'];
   const extra = (process.env.PATH || '').split(':').filter(Boolean);
   return Array.from(new Set([...base, ...extra])).join(':');
 }
 
-/**
- * The child's environment is deliberately a fixed, minimal set — never
- * `process.env`, which holds the panel's own secrets and paths. Next.js declares
- * `NODE_ENV` as required on ProcessEnv, so this is a plain string map and the one
- * cast below is where it meets execFile.
- */
 type ChildEnv = Record<string, string>;
 
 function childEnv(inst: Instance): ChildEnv {
   return {
     HOME: inst.home,
     PATH: childPath(),
-    // Each user gets their own daemon and rclone credentials. These are set
-    // explicitly so nothing leaks in from the panel's own environment.
+
     PM2_HOME: inst.pm2Home,
     RCLONE_CONFIG: inst.rcloneConfig,
     LANG: 'C.UTF-8',
@@ -120,18 +94,12 @@ export type RunResult = {
   code: number | null;
   stdout: string;
   stderr: string;
-  /** Set when the command could not be started at all (e.g. sudo refused). */
+
   spawnError?: string;
-  /** True when this specific run had to go through sudo. */
+
   viaSudo: boolean;
 };
 
-/**
- * Run a command as the instance's Linux user, with a minimal environment.
- *
- * When the panel already runs as that user (the common single-owner case) sudo is
- * skipped entirely. Otherwise sudo is required — see deploy/sudoers-backup-mgr.
- */
 export function runAs(
   inst: Instance,
   bin: string,
@@ -159,12 +127,10 @@ export function runAs(
       file,
       argv,
       {
-        // Config-relative paths are resolved by backup-mgr itself, so the working
-        // directory does not need to be the instance root — and `/` always exists.
         cwd: '/',
         timeout: opts.timeoutMs ?? 60_000,
         maxBuffer: opts.maxBuffer ?? 8 * 1024 * 1024,
-        // Never hand the panel's environment to another user.
+
         env: (useSudo ? { PATH: childPath() } : env) as NodeJS.ProcessEnv,
       },
       (err, stdout, stderr) => {
@@ -180,23 +146,12 @@ export function runAs(
       },
     );
     if (opts.stdin !== undefined && child.stdin) {
-      // Commands that never read stdin (tail, cat, test) exit and close the pipe
-      // before the payload is flushed, which surfaces as EPIPE. That is expected
-      // here, not an error worth crashing the panel over.
       child.stdin.on('error', () => {});
       child.stdin.end(opts.stdin);
     }
   });
 }
 
-/**
- * Start a long-lived command as the instance user, streaming its output.
- *
- * `runAs` buffers until exit, which is wrong for `rclone authorize`: it prints an
- * authorization URL and then stays alive until the user completes it in a
- * browser, so the panel must read output as it arrives. stdout and stderr are
- * merged because rclone writes its prompts to whichever it prefers.
- */
 export function spawnAs(
   inst: Instance,
   bin: string,
@@ -210,13 +165,12 @@ export function spawnAs(
     : args;
   return spawn(file, argv, {
     cwd: '/',
-    // Never hand the panel's environment (or its secrets) to another user.
+
     env: (useSudo ? { PATH: childPath() } : env) as NodeJS.ProcessEnv,
     stdio: ['pipe', 'pipe', 'pipe'],
   });
 }
 
-/** A bare command name is not usable from another user's PATH in the pm2 config. */
 export function absoluteBinary(): string {
   const bin = binaryPath();
   if (bin.includes('/')) return bin;
@@ -226,7 +180,6 @@ export function absoluteBinary(): string {
     }).trim();
     if (found) return found;
   } catch {
-    // fall through
   }
   return `/usr/local/bin/${bin}`;
 }
@@ -240,14 +193,9 @@ export function absolutePm2(): string {
     }).trim();
     if (found) return found;
   } catch {
-    // fall through
   }
   return bin;
 }
-
-// ---------------------------------------------------------------------------
-// File access, always as the owning user
-// ---------------------------------------------------------------------------
 
 export async function existsAs(inst: Instance, p: string): Promise<boolean> {
   const res = await runAs(inst, 'sh', ['-c', 'test -e "$1"', 'sh', p]);
@@ -260,10 +208,6 @@ export async function readFileAs(inst: Instance, p: string): Promise<string | nu
   return res.stdout;
 }
 
-/**
- * Write a file as the owning user. `umask 077` means the file is never briefly
- * world-readable, unlike create-then-chmod.
- */
 export async function writeFileAs(
   inst: Instance,
   p: string,
@@ -277,7 +221,6 @@ export async function writeFileAs(
   if (mode) await runAs(inst, 'chmod', [mode, p]);
 }
 
-/** Atomic replace within the same directory, so a reader never sees a partial file. */
 export async function writeFileAtomicAs(
   inst: Instance,
   p: string,
@@ -295,11 +238,6 @@ export async function writeFileAtomicAs(
 
 export type RemoteFileEntry = { name: string; size: number; mtime: string };
 
-/**
- * List a directory as the owning user. Emits NUL-separated fields from a single
- * shell invocation so filenames containing spaces cannot be mis-parsed, and so
- * listing a directory costs one process rather than one per file.
- */
 export async function listFilesAs(inst: Instance, dir: string): Promise<RemoteFileEntry[]> {
   const script =
     'cd "$1" || exit 1; for f in *; do [ -f "$f" ] || continue; ' +
@@ -320,7 +258,6 @@ export async function listFilesAs(inst: Instance, dir: string): Promise<RemoteFi
   return out;
 }
 
-/** Read the last `maxBytes` of a file as the owning user. */
 export async function readTailAs(
   inst: Instance,
   p: string,
@@ -338,11 +275,6 @@ export async function mkdirAs(inst: Instance, p: string, mode = '700'): Promise<
   }
 }
 
-// ---------------------------------------------------------------------------
-// Provisioning
-// ---------------------------------------------------------------------------
-
-/** pm2 config for one instance, generated so it references only that user's paths. */
 export function ecosystemFor(inst: Instance): string {
   return `const path = require('path');
 
@@ -377,18 +309,11 @@ module.exports = {
 export type ProvisionResult = {
   ok: boolean;
   created: string[];
-  /** config.yml already existed, so it was deliberately left alone. */
+
   keptExisting: string[];
   error?: string;
 };
 
-/**
- * Create an instance's directories and seed a config.yml + ecosystem file.
- *
- * Idempotent, and never overwrites an existing config.yml: that file holds the
- * gpg passphrase, the OAuth token and the Discord webhook, so replacing it would
- * be destructive.
- */
 export async function provision(inst: Instance): Promise<ProvisionResult> {
   const created: string[] = [];
   const keptExisting: string[] = [];

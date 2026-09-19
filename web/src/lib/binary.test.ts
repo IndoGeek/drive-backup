@@ -33,7 +33,6 @@ describe('installTarget', () => {
   });
 
   it('is not fooled by a sibling directory sharing the prefix', () => {
-    // /srv/backup/targets is NOT inside /srv/backup/target
     expect(installTarget(root, '/srv/backup/targets/backup-mgr')).toBe(
       '/srv/backup/targets/backup-mgr',
     );
@@ -108,8 +107,6 @@ describe('compareRunningBinary', () => {
   });
 
   it('does not flag a daemon started from a different install location', () => {
-    // BACKUP_MGR_BIN may point at the build tree while the daemon runs the
-    // installed copy — that is a configuration choice, not a stale build.
     const r = compareRunningBinary(
       { exe_path: '/root/.cargo/bin/backup-mgr', deleted: false, dev: 2, ino: 7 },
       disk,
@@ -136,9 +133,6 @@ describe('installArgs', () => {
   });
 
   it('never repeats the command name, which would make install expect a directory', () => {
-    // `sudo -n install install -m 0755 …` makes GNU install read two sources and
-    // fail with "target …: Not a directory" — the bug that made a NOPASSWD host
-    // ask for a sudo password.
     expect(installArgs('/srv/a', '/usr/local/bin/backup-mgr')).not.toContain('install');
   });
 });

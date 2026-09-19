@@ -40,7 +40,7 @@ import { cn } from '@/lib/cn';
 type User = {
   id: number;
   username: string;
-  /** Derived from sudo on the server — see lib/sudo.ts. */
+
   is_admin: boolean;
   sudo: { has_sudo: boolean; source: string; nopass_hint: boolean };
   permissions: Permission[];
@@ -50,7 +50,6 @@ type User = {
   created_at: string;
 };
 
-/** The caller's own elevation state, reported by /api/sudo. */
 type SudoState = {
   has_sudo: boolean;
   passwordless: boolean | null;
@@ -59,7 +58,6 @@ type SudoState = {
   timeout_ms: number;
 };
 
-/** What the panel reports about its live mirror of the server's accounts. */
 type SyncState = {
   running: boolean;
   auto_sync: boolean;
@@ -109,7 +107,6 @@ export default function UsersPage() {
     void loadElevation();
   }, [loadElevation]);
 
-  /** End elevation now — the equivalent of `sudo -k`. */
   async function endElevation() {
     await fetch('/api/sudo', { method: 'DELETE' });
     await loadElevation();
@@ -133,10 +130,6 @@ export default function UsersPage() {
     setFormPerms([]);
   }
 
-  /**
-   * A 428 that is still 428 after the dialog means the password was not accepted
-   * (or the prompt was dismissed) — say so instead of showing a bare status code.
-   */
   function elevationMessage(res: Response, data: { error?: string }): string | null {
     if (res.status !== 428) return null;
     return data.error ?? 'sudo password required — nothing was changed';
@@ -156,7 +149,7 @@ export default function UsersPage() {
       const res = await fetchElevated('/api/users', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        // Admin is not sent: it follows sudo on the server, and the API refuses it.
+
         body: JSON.stringify({ id: editId, permissions: formPerms, enabled: formEnabled }),
       });
       const data = (await res.json()) as { error?: string; users?: User[] };
@@ -205,7 +198,6 @@ export default function UsersPage() {
     }
   }
 
-  /** Ask the panel to reconcile the mirror right now (the watcher also does this on a timer). */
   async function resync() {
     setBusy(true);
     setError(null);
@@ -245,7 +237,6 @@ export default function UsersPage() {
     }
   }
 
-  /** Create every missing instance at once — useful right after an OS change. */
   async function provisionAll() {
     setBusy(true);
     setError(null);
@@ -331,7 +322,7 @@ export default function UsersPage() {
         </p>
       </div>
 
-      {/* Self */}
+      {}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">

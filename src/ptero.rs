@@ -9,11 +9,6 @@ use tungstenite::client::IntoClientRequest;
 const STATE_OFFLINE: &str = "offline";
 const STATE_RUNNING: &str = "running";
 
-/// Pterodactyl integration error. `critical` errors MUST abort the run even
-/// when `fail_on_error: false`, because they mean we lost track of the server
-/// state (e.g. it never confirmed it stopped) and a backup taken now could be
-/// corrupt. They are always produced together with a `PteroGuard`, so the
-/// server still gets restarted before the run ends.
 pub struct PteroError {
     pub message: String,
     pub critical: bool,
@@ -39,7 +34,6 @@ struct WsData {
     socket: String,
 }
 
-/// Ask Pterodactyl panel for websocket credentials.
 fn fetch_ws_creds(cfg: &Config) -> Result<(String, String), String> {
     let base = cfg.inner.pterodactyl.panel_url.trim().trim_end_matches('/');
     let url = format!("{}/api/client/servers/{}/websocket", base, cfg.inner.pterodactyl.server_id);
@@ -56,7 +50,6 @@ fn fetch_ws_creds(cfg: &Config) -> Result<(String, String), String> {
     Ok((parsed.data.socket, parsed.data.token))
 }
 
-/// Run the websocket conversation in a helper thread so we can enforce a timeout.
 fn run_ws_command(socket: &str, jwt: &str, origin: &str, command: &str, auth_timeout_secs: u64, console_wait_ms: u64) -> Result<bool, String> {
     let (tx, rx) = mpsc::channel();
     let socket = socket.to_string();
@@ -66,9 +59,6 @@ fn run_ws_command(socket: &str, jwt: &str, origin: &str, command: &str, auth_tim
 
     let handle = thread::spawn(move || {
         let result: Result<bool, String> = (|| {
-            // Wings (and some forks) reject websocket upgrades unless the Origin
-            // header matches the PANEL url. Build an explicit request and set
-            // Origin so the panel's `socket` endpoint accepts the upgrade.
             let mut request = socket
                 .into_client_request()
                 .map_err(|e| format!("cannot build websocket request: {e}"))?;
@@ -78,12 +68,10 @@ fn run_ws_command(socket: &str, jwt: &str, origin: &str, command: &str, auth_tim
             let (mut ws, _) = tungstenite::connect(request)
                 .map_err(|e| format!("websocket connect failed: {e}"))?;
 
-            // Pterodactyl authenticates via a JSON auth event carrying the JWT.
             let auth = serde_json::json!({"event": "auth", "args": [jwt]});
             ws.send(tungstenite::Message::Text(auth.to_string().into()))
                 .map_err(|e| format!("websocket auth send failed: {e}"))?;
 
-            // Authenticate
             let mut authed = false;
             let deadline = std::time::Instant::now() + Duration::from_secs(auth_timeout_secs);
             while !authed {
@@ -103,19 +91,16 @@ fn run_ws_command(socket: &str, jwt: &str, origin: &str, command: &str, auth_tim
                 }
             }
 
-            // Subscribe to console so the panel forwards us the command echo
             let subscribe = serde_json::json!({"event": "console", "args": ["subscribe"]});
             ws.send(tungstenite::Message::Text(subscribe.to_string().into()))
                 .map_err(|e| format!("websocket subscribe failed: {e}"))?;
 
-            // Send the command
             if !command.trim().is_empty() {
                 let payload = serde_json::json!({"event": "send command", "args": [command]});
                 ws.send(tungstenite::Message::Text(payload.to_string().into()))
                     .map_err(|e| format!("websocket command send failed: {e}"))?;
             }
 
-            // Best-effort: wait for the command to be echoed in console output
             let mut echoed = false;
             let console_deadline = std::time::Instant::now() + Duration::from_millis(console_wait_ms);
             while std::time::Instant::now() < console_deadline {
@@ -158,8 +143,6 @@ fn total_timeout(auth_secs: u64) -> u64 {
     auth_secs.max(15) + 5
 }
 
-/// Derive the websocket `Origin` header value from the panel URL. Wings forks
-/// reject upgrades whose Origin host does not match the panel.
 fn origin_from_panel(cfg: &Config) -> String {
     let base = cfg.inner.pterodactyl.panel_url.trim().trim_end_matches('/');
     if base.starts_with("https://") {
@@ -177,9 +160,6 @@ fn api_base(cfg: &Config) -> String {
     )
 }
 
-/// Turn a ureq error into a helpful message. 403 from Pterodactyl's CLIENT API
-/// almost always means the API key is an Application key (ptla_) or belongs to
-/// an account without control of this server.
 fn api_err_msg(op: &str, e: ureq::Error) -> String {
     match e {
         ureq::Error::Status(403, _) => format!(
@@ -215,7 +195,6 @@ fn api_post(cfg: &Config, path: &str, body: &serde_json::Value) -> Result<(), St
     Ok(())
 }
 
-/// Current state reported by the panel: starting | running | stopping | offline | ...
 fn server_current_state(cfg: &Config) -> Result<String, String> {
     let v = api_get(cfg, "/resources")?;
     let s = v["attributes"]["current_state"].as_str().unwrap_or("").to_string();
@@ -226,12 +205,10 @@ fn server_current_state(cfg: &Config) -> Result<String, String> {
     }
 }
 
-/// Send a power signal (start | stop | restart | kill) to the server.
 fn power_signal(cfg: &Config, signal: &str) -> Result<(), String> {
     api_post(cfg, "/power", &serde_json::json!({"signal": signal}))
 }
 
-/// Poll the panel until the server reaches `target`, logging each transition.
 fn wait_for_state(cfg: &Config, target: &str, timeout_secs: u64, logger: &Logger) -> Result<(), String> {
     let deadline = Instant::now() + Duration::from_secs(timeout_secs.max(30));
     let mut last = String::new();
@@ -251,7 +228,6 @@ fn wait_for_state(cfg: &Config, target: &str, timeout_secs: u64, logger: &Logger
     }
 }
 
-/// Start the server (if it is not already running) and wait for confirmation.
 fn restart_server(cfg: &Config, logger: &Logger, timeout_secs: u64) -> Result<(), String> {
     let current = server_current_state(cfg).unwrap_or_default();
     if current == STATE_RUNNING {
@@ -262,10 +238,6 @@ fn restart_server(cfg: &Config, logger: &Logger, timeout_secs: u64) -> Result<()
     wait_for_state(cfg, STATE_RUNNING, timeout_secs, logger)
 }
 
-/// RAII guard that guarantees the server is started again when it goes out of
-/// scope, no matter which path `run_backup` returns through (success, failure,
-/// early return, or even a panic). The only way a stopped server is left down
-/// is if the whole process is killed hard (SIGKILL).
 pub struct PteroGuard<'a> {
     cfg: &'a Config,
     logger: &'a Logger,
@@ -287,8 +259,6 @@ impl<'a> PteroGuard<'a> {
         }
     }
 
-    /// Explicitly restart the server on the happy path so the log order reads
-    /// naturally (restart before the "BACKUP RUN FINISHED OK" line).
     pub fn restart_now(&mut self) {
         if self.shutdown_server && self.start_server_after && !self.started {
             match restart_server(self.cfg, self.logger, self.start_timeout_secs) {
@@ -297,7 +267,6 @@ impl<'a> PteroGuard<'a> {
                     self.logger.info("pterodactyl: server started again after backup");
                 }
                 Err(e) => {
-                    // not marked started, so Drop will retry once more on return
                     self.logger.error(&format!(
                         "pterodactyl: FAILED to restart the server after backup ({e}) - retrying on exit"
                     ));
@@ -313,13 +282,6 @@ impl<'a> Drop for PteroGuard<'a> {
     }
 }
 
-/// Pre-backup Pterodactyl integration.
-///
-/// When the server is stopped for the backup, a `PteroGuard` is written into
-/// `out_guard` that restarts the server when it is dropped (i.e. when the run
-/// ends). That stays true even if this function fails afterwards: a failure
-/// that happens after the stop signal was sent is returned as `critical`, and
-/// the caller MUST abort the run.
 pub fn pre_backup<'a>(
     cfg: &'a Config,
     logger: &'a Logger,
@@ -353,7 +315,6 @@ pub fn pre_backup<'a>(
         ));
     }
 
-    // 1) Flush the world to disk (e.g. "save-all"). The server stays online.
     logger.info(&format!(
         "pterodactyl: sending console command '{}' to server {}",
         p.pre_backup_command, p.server_id
@@ -364,7 +325,6 @@ pub fn pre_backup<'a>(
     let echoed = run_ws_command(&socket, &jwt, &origin, &p.pre_backup_command, 20, 5000)
         .map_err(PteroError::soft)?;
 
-    // 2) Wait while the flush finishes writing to disk.
     if p.pre_backup_delay_seconds > 0 {
         logger.debug(&format!(
             "pterodactyl: command accepted, waiting {}s for disk flush",
@@ -376,12 +336,10 @@ pub fn pre_backup<'a>(
         logger.warn("pterodactyl: could not confirm the console command was run (continuing)");
     }
 
-    // 3) Legacy mode: save-only, never stop the server.
     if !p.shutdown_server {
         return Ok(());
     }
 
-    // 4) Stop the server completely so every file is quiescent and readable.
     let current = match server_current_state(cfg) {
         Ok(s) => s,
         Err(e) => {
@@ -402,9 +360,6 @@ pub fn pre_backup<'a>(
         ));
     }
 
-    // From here on the server may end up stopped, so the guard already owns the
-    // restart. Every failure past this point is critical: continuing would
-    // archive a server that is mid-shutdown / in an unknown state.
     *out_guard = Some(PteroGuard::new(cfg, logger, p.start_server_after, p.start_timeout_seconds));
     logger.info(&format!(
         "pterodactyl: sending power signal '{}' and waiting (up to {}s) for the server to go fully offline",

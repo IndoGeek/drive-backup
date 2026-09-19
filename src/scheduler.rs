@@ -1,7 +1,6 @@
 use chrono::{DateTime, Duration, LocalResult, NaiveDate};
 use chrono_tz::Tz;
 
-/// Parse "HH:MM" into minutes since midnight.
 pub fn parse_time(s: &str) -> Option<u32> {
     let t: Vec<&str> = s.trim().split(':').collect();
     if t.len() != 2 {
@@ -15,7 +14,6 @@ pub fn parse_time(s: &str) -> Option<u32> {
     Some(h * 60 + m)
 }
 
-/// Evenly distributed run minutes across a day, anchored at the base time.
 pub fn schedule_minutes(base: &str, per_day: u32) -> Vec<u32> {
     let base_min = parse_time(base).unwrap_or(3 * 60 + 30);
     let n = per_day.max(1);
@@ -23,11 +21,6 @@ pub fn schedule_minutes(base: &str, per_day: u32) -> Vec<u32> {
     (0..n).map(|k| (base_min + k * step) % 1440).collect()
 }
 
-/// Build the instant for a local wall-clock time on a given day.
-///
-/// Returns `None` when the local time does not exist (DST spring-forward gap),
-/// so callers can skip that slot instead of panicking. During a DST fall-back
-/// the clock repeats and the time exists twice; the earliest occurrence is used.
 fn moment_for(day: NaiveDate, minutes: u32, tz: Tz) -> Option<DateTime<Tz>> {
     let naive = day.and_hms_opt(minutes / 60, minutes % 60, 0)?;
     match naive.and_local_timezone(tz) {
@@ -37,7 +30,6 @@ fn moment_for(day: NaiveDate, minutes: u32, tz: Tz) -> Option<DateTime<Tz>> {
     }
 }
 
-/// Next scheduled run strictly after `now`.
 pub fn next_run(now: DateTime<Tz>, schedule: &[u32]) -> DateTime<Tz> {
     let today = now.date_naive();
     let mut candidates: Vec<DateTime<Tz>> = schedule
@@ -53,15 +45,13 @@ pub fn next_run(now: DateTime<Tz>, schedule: &[u32]) -> DateTime<Tz> {
             .collect();
     }
     candidates.sort();
-    // A slot may be skipped on a DST day, and an empty schedule is possible if
-    // misconfigured; wait a short while instead of panicking on an empty list.
+
     candidates
         .into_iter()
         .next()
         .unwrap_or_else(|| now + Duration::hours(1))
 }
 
-/// Most recent scheduled moment not after `now` (used for catch-up logic).
 pub fn last_passed(now: DateTime<Tz>, schedule: &[u32]) -> Option<DateTime<Tz>> {
     let today = now.date_naive();
     let yesterday = today - Duration::days(1);
@@ -74,8 +64,6 @@ pub fn last_passed(now: DateTime<Tz>, schedule: &[u32]) -> Option<DateTime<Tz>> 
     all.into_iter().rev().find(|c| *c <= now)
 }
 
-/// True if we are after a missed slot today within the window and the last
-/// successful run predates that slot.
 pub fn should_catch_up(
     now: DateTime<Tz>,
     schedule: &[u32],
@@ -110,15 +98,12 @@ mod tests {
 
     #[test]
     fn spring_forward_gap_has_no_instant() {
-        // 2024-03-10 in America/New_York: 02:00 jumps straight to 03:00, so the
-        // 02:30 wall-clock time does not exist.
         let day = NaiveDate::from_ymd_opt(2024, 3, 10).unwrap();
         assert!(moment_for(day, 2 * 60 + 30, ny()).is_none());
     }
 
     #[test]
     fn fall_back_ambiguous_uses_earliest_occurrence() {
-        // 2024-11-03: 01:30 occurs twice; the earliest is EDT (-04:00).
         let day = NaiveDate::from_ymd_opt(2024, 11, 3).unwrap();
         let dt = moment_for(day, 90, ny()).expect("01:30 should resolve to an instant");
         assert_eq!(dt.format("%Y-%m-%dT%H:%M:%S%:z").to_string(), "2024-11-03T01:30:00-04:00");
@@ -126,8 +111,8 @@ mod tests {
 
     #[test]
     fn next_run_skips_dst_gap_without_panicking() {
-        let now = at(2024, 3, 10, 1, 0); // 01:00 EST, before the gap
-        let next = next_run(now, &[150]); // 02:30, nonexistent today -> tomorrow
+        let now = at(2024, 3, 10, 1, 0);
+        let next = next_run(now, &[150]);
         assert_eq!(next.format("%Y-%m-%d %H:%M").to_string(), "2024-03-11 02:30");
     }
 
@@ -141,7 +126,7 @@ mod tests {
     #[test]
     fn last_passed_handles_gap_without_panicking() {
         let now = at(2024, 3, 10, 4, 0);
-        // Schedule contains a gap slot (02:30) plus a valid one (06:00).
+
         let _ = last_passed(now, &[150, 6 * 60]);
     }
 }

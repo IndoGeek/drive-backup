@@ -21,10 +21,6 @@ export default function LoginPage() {
     e.preventDefault();
     if (loading) return;
 
-    // Read the values off the DOM rather than from React state. Password
-    // managers autofill inputs *without* firing the events state is synced on,
-    // which used to leave the fields looking filled while state stayed empty —
-    // so the button never enabled. Values are only ever read on submit.
     const form = e.currentTarget;
     const username = (form.elements.namedItem('username') as HTMLInputElement | null)?.value.trim() ?? '';
     const password = (form.elements.namedItem('password') as HTMLInputElement | null)?.value ?? '';

@@ -17,10 +17,9 @@ import { recordAudit } from '@/lib/audit';
 import { clientAddress } from '@/lib/session';
 
 export const runtime = 'nodejs';
-// `cargo build --release` can take minutes on a small VPS.
+
 export const maxDuration = 1200;
 
-/** Only one rebuild at a time; a second click must not race the first. */
 let inFlight = false;
 
 export type InstallResponse = {
@@ -35,18 +34,10 @@ async function run(req: Request, username: string): Promise<InstallResponse | Ne
   const root = checkoutRoot();
   const target = installTarget(root, resolveBinaryPath(binaryPath()));
 
-  // Installing over the shared binary is privileged work, so the install step runs
-  // under *this user's* sudo: silent when their rules are NOPASSWD, otherwise
-  // authorized by the password they supplied (see lib/sudo.ts). The build is not
-  // privileged — it only writes inside the checkout.
   const install: InstallRunner = async (t, root) => {
-    // Absolute source *and* the checkout as cwd: `install` resolves a relative
-    // source against the cwd, and the panel process runs in web/, not the checkout.
     const source = path.join(root, 'target', 'release', 'backup-mgr');
     const label = `sudo install -m 0755 ${source} ${t}`;
-    // `installArgs` deliberately omits the command name: the program is passed
-    // separately, and repeating it made install read two sources and insist the
-    // target be a directory.
+
     const args = installArgs(source, t);
     const outcome = await runElevated(req, username, 'install', args, {
       timeoutMs: 120_000,
@@ -89,14 +80,9 @@ async function run(req: Request, username: string): Promise<InstallResponse | Ne
 }
 
 export async function POST(req: Request) {
-  // Panel-scoped, not instance-scoped: one shared binary serves every user, so
-  // this is gated by the privileged `binary.install` permission rather than by
-  // which instance the caller owns.
   const g = guard(req, 'binary.install');
   if (!g.ok) return g.response;
 
-  // ...and then by the caller's own sudo, so the panel cannot lend anyone a
-  // privilege their Linux account does not have.
   const denial = await authorizePrivileged(req, g.user, 'reinstall the shared binary');
   if (denial) return denial;
 
