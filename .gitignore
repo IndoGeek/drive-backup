@@ -1,0 +1,77 @@
+# =============================================================================
+# Never commit anything specific to *your* deployment.
+#
+# This is a generic, redistributable project: a fresh clone must not reveal your
+# host, paths, domain, users, tokens or backup payloads. If you add a file that
+# carries any of those, add it here first — and remember that .gitignore only
+# affects *future* commits; anything already committed stays in history.
+# =============================================================================
+
+# --- Secrets and live configuration -----------------------------------------
+# Real config.yml holds the gpg passphrase, Pterodactyl key, OAuth refresh
+# token and Discord webhook. config.example.yml is the committed template.
+config.yml
+
+# Environment files (keep the .example templates).
+.env
+.env.*
+!.env.example
+!.env.defaults
+
+# rclone credentials.
+rclone.conf
+
+# --- Runtime state and payloads ---------------------------------------------
+# SQLite history + WAL, and ad-hoc copies (history.db.bak-<timestamp>).
+history.db
+history.db-shm
+history.db-wal
+history.db.bak*
+
+# Run state / manual-resume flag.
+state.json
+
+# Backup archives and logs, wherever they are configured to live.
+/backup/
+/logs/
+# Panel logs (`next`/pm2 write here). Note this is spelled out per-directory
+# rather than as a bare `logs/`, which would also swallow the source route
+# directory `web/src/app/logs/`.
+/web/logs/
+*.log
+
+*.tar
+*.tar.gz
+*.tar.zst
+*.tar.xz
+*.tar.bz2
+*.zip
+*.gpg
+
+# --- Build artifacts --------------------------------------------------------
+target/
+node_modules/
+.next/
+out/
+dist/
+*.tsbuildinfo
+web/next-env.d.ts
+
+# --- Panel data (user database + session secret) -----------------------------
+/web/data/
+
+# --- Editor / OS backup + OS noise -----------------------------------------
+# SQLite dumps and editor/OS backups of tracked files.
+*.bak
+*.bak-*
+*.orig
+*.rej
+
+# --- Editor / OS noise ------------------------------------------------------
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/

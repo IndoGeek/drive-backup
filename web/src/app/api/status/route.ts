@@ -1,0 +1,56 @@
+import { NextResponse } from 'next/server';
+import { parseTrailingJson, runCli, staleBinaryHint } from '@/lib/cli';
+import { guard } from '@/lib/auth';
+import { binary } from '@/lib/env';
+
+export const runtime = 'nodejs';
+
+export type StatusPayload = {
+  state: {
+    stage: string;
+    status: string;
+    current_backup: string;
+    started_at: string | null;
+    finished_at: string | null;
+    last_error: string;
+    requires_manual_resume: boolean;
+    last_run_at: string | null;
+    generation: number;
+  };
+  config: {
+    backup_path: string;
+    backup_dir: string;
+    log_dir: string;
+    compression: string;
+    time: string;
+    backups_per_day: number;
+    timezone: string;
+    encrypt_enabled: boolean;
+    upload_to_all: boolean;
+    max_local_backups: number;
+    min_free_disk_gb: number;
+  };
+  remotes: { label: string; remote: string; dir: string; retention: number }[];
+  next_run_at?: string | null;
+  next_run_seconds?: number | null;
+};
+
+export async function GET(req: Request) {
+  const g = guard(req, 'dashboard.view');
+  if (!g.ok) return g.response;
+
+  const res = await runCli(['status', '--json'], 30_000);
+  const parsed = parseTrailingJson<StatusPayload>(res.stdout);
+  if (!parsed) {
+    return NextResponse.json(
+      {
+        error: `could not read status from the backup-mgr binary — ${staleBinaryHint()}`,
+        binary: binary(),
+        stderr: res.stderr,
+        stdout: res.stdout,
+      },
+      { status: 502 },
+    );
+  }
+  return NextResponse.json(parsed);
+}
