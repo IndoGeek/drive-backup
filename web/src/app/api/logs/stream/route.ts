@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { backupLogDir, findLogSource, logSourceDefs } from '@/lib/logs';
+import { backupLogDir, findLogSource, logSourceDefs, sseDataLines } from '@/lib/logs';
 import { runAs, type Instance } from '@/lib/instance';
 import { guard } from '@/lib/auth';
 import { pickInstance } from '@/lib/routeutil';
@@ -89,7 +89,7 @@ export async function GET(req: Request) {
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       const frame = (event: string, data: string) =>
-        controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+        controller.enqueue(encoder.encode(`event: ${event}\n${sseDataLines(data)}\n\n`));
 
       const tick = async () => {
         if (closed) return;

@@ -74,7 +74,7 @@ mod path_guard {
     pub struct LockGuard(pub std::path::PathBuf);
     impl Drop for LockGuard {
         fn drop(&mut self) {
-            let _ = std::fs::remove_dir(&self.0);
+            let _ = std::fs::remove_dir_all(&self.0);
         }
     }
 }
@@ -145,18 +145,27 @@ fn log_state_line(logger: &Logger, s: &RunState) {
     logger.debug(&format!("state -> {}", s.describe()));
 }
 
+fn write_lock_pid(lock: &Path) -> Result<(), String> {
+    std::fs::write(lock.join("pid"), std::process::id().to_string())
+        .map_err(|e| format!("cannot write lock pid: {e}"))
+}
+
 fn acquire_lock(state_dir: &Path, logger: &Logger) -> Result<LockGuard, String> {
     std::fs::create_dir_all(state_dir).map_err(|e| e.to_string())?;
     let lock = state_dir.join(LOCK_NAME);
     match std::fs::create_dir(&lock) {
-        Ok(_) => Ok(LockGuard(lock)),
+        Ok(_) => {
+            write_lock_pid(&lock)?;
+            Ok(LockGuard(lock))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             if let Ok(meta) = std::fs::metadata(&lock) {
                 if let Ok(modified) = meta.modified() {
                     if let Ok(age) = modified.elapsed() {
                         if age > Duration::from_secs(6 * 3600) {
-                            let _ = std::fs::remove_dir(&lock);
+                            let _ = std::fs::remove_dir_all(&lock);
                             std::fs::create_dir(&lock).map_err(|e| e.to_string())?;
+                            write_lock_pid(&lock)?;
                             logger.warn("removed stale run lock (older than 6h)");
                             return Ok(LockGuard(lock));
                         }
@@ -829,6 +838,34 @@ fn cmd_remote_auth(cfg: &Config, cfg_path: &Path, logger: &Logger) -> Result<(),
     Ok(())
 }
 
+fn run_lock_info(state_dir: &Path) -> serde_json::Value {
+    let lock = state_dir.join(LOCK_NAME);
+    let present = lock.is_dir();
+    let age_seconds = if present {
+        std::fs::metadata(&lock)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.elapsed().ok())
+            .map(|d| d.as_secs() as i64)
+    } else {
+        None
+    };
+    let pid = if present {
+        std::fs::read_to_string(lock.join("pid"))
+            .ok()
+            .and_then(|s| s.trim().parse::<i64>().ok())
+    } else {
+        None
+    };
+    let pid_alive = pid.map(|p| std::path::Path::new(&format!("/proc/{p}")).exists());
+    serde_json::json!({
+        "present": present,
+        "age_seconds": age_seconds,
+        "pid": pid,
+        "pid_alive": pid_alive,
+    })
+}
+
 fn cmd_status(cfg: &Config, logger: &Logger, limit: Option<usize>) -> Result<(), String> {
     let state_file = cfg.resolve(&cfg.inner.state.file);
     let st = RunState::load(&state_file);
@@ -901,6 +938,7 @@ fn cmd_status_json(cfg: &Config) -> Result<(), String> {
             "min_free_disk_gb": b.min_free_disk_gb,
         },
         "remotes": remotes,
+        "run_lock": run_lock_info(&state_file.parent().map(Path::to_path_buf).unwrap_or_default()),
         "next_run_at": next.to_rfc3339(),
         "next_run_local": next.format("%Y-%m-%d %H:%M:%S %Z").to_string(),
         "next_run_seconds": next_secs,
@@ -931,7 +969,7 @@ fn cmd_reset(cfg: &Config) -> Result<(), String> {
     RunState::reset(&state_file)?;
     let lock = state_dir.join(LOCK_NAME);
     if lock.is_dir() {
-        match std::fs::remove_dir(&lock) {
+        match std::fs::remove_dir_all(&lock) {
             Ok(_) => println!("cleared stale run lock: {}", lock.display()),
             Err(e) => println!("could not clear run lock {}: {}", lock.display(), e),
         }

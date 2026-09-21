@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { AlertTriangle, Info, Loader2, Save } from 'lucide-react';
+import { AlertTriangle, HelpCircle, Info, Loader2, Save, X } from 'lucide-react';
 import {
   Button,
   Card,
@@ -104,6 +104,16 @@ export default function ConfigPage() {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [helpField, setHelpField] = useState<Field | null>(null);
+
+  useEffect(() => {
+    if (!helpField) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setHelpField(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [helpField]);
 
   useEffect(() => {
     void (async () => {
@@ -212,13 +222,24 @@ export default function ConfigPage() {
                   <div key={field.key} className="space-y-2">
                     <div className="flex flex-wrap items-center justify-between gap-2 sm:gap-4">
                       <Label htmlFor={field.key}>{field.label}</Label>
-                      {field.type === 'boolean' && (
-                        <Switch
-                          checked={Boolean(values[field.key])}
-                          onCheckedChange={(v) => setValue(field.key, v)}
-                          disabled={!editable}
-                        />
-                      )}
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => setHelpField(field)}
+                          aria-label={`Help for ${field.label}`}
+                          title="What does this do?"
+                          className="rounded-full p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        >
+                          <HelpCircle className="h-4 w-4" />
+                        </button>
+                        {field.type === 'boolean' && (
+                          <Switch
+                            checked={Boolean(values[field.key])}
+                            onCheckedChange={(v) => setValue(field.key, v)}
+                            disabled={!editable}
+                          />
+                        )}
+                      </div>
                     </div>
                     <FieldControl
                       field={field}
@@ -226,12 +247,58 @@ export default function ConfigPage() {
                       onChange={(v) => setValue(field.key, v)}
                       disabled={!editable}
                     />
-                    {field.help && <p className="text-xs text-muted-foreground">{field.help}</p>}
                   </div>
                 ))}
               </CardContent>
             </Card>
           ))}
+        </div>
+      )}
+
+      {helpField && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`Help for ${helpField.label}`}
+        >
+          <div
+            className="absolute inset-0 bg-black/50"
+            onClick={() => setHelpField(null)}
+            aria-hidden="true"
+          />
+          <div className="relative z-10 max-h-[85vh] w-full max-w-lg overflow-hidden rounded-lg border border-border bg-background shadow-xl">
+            <div className="flex items-start justify-between gap-4 border-b border-border bg-muted/30 p-4">
+              <div className="min-w-0">
+                <h2 className="text-base font-semibold leading-tight">{helpField.label}</h2>
+                <p className="mt-0.5 font-mono text-xs text-muted-foreground">{helpField.key}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setHelpField(null)}
+                aria-label="Close help"
+                className="rounded-full p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="max-h-[55vh] overflow-y-auto p-4">
+              {helpField.help ? (
+                <p className="whitespace-pre-line text-sm leading-relaxed text-muted-foreground">
+                  {helpField.help}
+                </p>
+              ) : (
+                <p className="text-sm text-muted-foreground">
+                  No additional help is available for this option.
+                </p>
+              )}
+            </div>
+            <div className="flex justify-end border-t border-border p-3">
+              <Button variant="outline" size="sm" onClick={() => setHelpField(null)}>
+                Close
+              </Button>
+            </div>
+          </div>
         </div>
       )}
     </div>

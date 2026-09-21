@@ -3,6 +3,7 @@ import { parseTrailingJson, runCli, staleBinaryHint } from '@/lib/cli';
 import { guard } from '@/lib/auth';
 import { binaryPath } from '@/lib/panel';
 import { instanceView, pickInstance, requireProvisioned } from '@/lib/routeutil';
+import { computeStale, type RunLockFacts, type StaleInfo } from '@/lib/stale';
 
 export const runtime = 'nodejs';
 
@@ -34,6 +35,8 @@ export type StatusPayload = {
   remotes: { label: string; remote: string; dir: string; retention: number }[];
   next_run_at?: string | null;
   next_run_seconds?: number | null;
+  run_lock?: RunLockFacts;
+  stale?: StaleInfo | null;
 };
 
 export async function GET(req: Request) {
@@ -62,5 +65,6 @@ export async function GET(req: Request) {
       { status: 502 },
     );
   }
-  return NextResponse.json({ ...parsed, instance: instanceView(inst) });
+  const stale = computeStale(parsed.state, parsed.run_lock);
+  return NextResponse.json({ ...parsed, stale, instance: instanceView(inst) });
 }

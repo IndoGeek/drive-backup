@@ -7,6 +7,7 @@ import {
   listLogSources,
   logSourceDefs,
   readLog,
+  sseDataLines,
   type LogSourceDef,
 } from './logs';
 import { instanceFor, writeFileAs, type Instance } from './instance';
@@ -91,6 +92,24 @@ describe('listLogSources', () => {
       { id: 'x', label: 'x', description: '', access: 'instance', dir: '/definitely/not/here', match: () => true },
     ]);
     expect(views[0].files).toEqual([]);
+  });
+});
+
+describe('sseDataLines', () => {
+  it('keeps every log line on its own data line so the browser rebuilds newlines', () => {
+    const framed = sseDataLines('line one\nline two\nset\n');
+    expect(framed).toBe('data: line one\ndata: line two\ndata: set\ndata: ');
+
+    const reconstructed = framed
+      .split('\n')
+      .map((l) => (l.startsWith('data: ') ? l.slice(6) : l === 'data:' ? '' : l))
+      .join('\n');
+    expect(reconstructed).toBe('line one\nline two\nset\n');
+  });
+
+  it('does not render a JSON-encoded escape sequences into the frame', () => {
+    const framed = sseDataLines('a\nb');
+    expect(framed).not.toContain('\\n');
   });
 });
 

@@ -134,3 +134,10 @@ export async function readLog(
   if (def.access === 'panel') return readPanelTail(full, maxBytes);
   return readTailAs(inst, full, maxBytes);
 }
+
+export function sseDataLines(data: string): string {
+  return data
+    .split('\n')
+    .map((line) => `data: ${line}`)
+    .join('\n');
+}

@@ -22,6 +22,7 @@ import {
   Square,
   Terminal,
   Wrench,
+  X,
   XCircle,
 } from 'lucide-react';
 import {
@@ -97,6 +98,13 @@ type Status = {
   next_run_at?: string | null;
   next_run_local?: string | null;
   next_run_seconds?: number | null;
+  run_lock?: {
+    present: boolean;
+    age_seconds: number | null;
+    pid: number | null;
+    pid_alive: boolean | null;
+  };
+  stale?: { message: string; items: string[] } | null;
 };
 
 type BinaryInfo = {
@@ -160,6 +168,9 @@ export default function DashboardPage() {
   const { fetchElevated } = useSudo();
 
   const [status, setStatus] = useState<Status | null>(null);
+  const [stale, setStale] = useState<Status['stale'] | null>(null);
+  const [staleDismissed, setStaleDismissed] = useState<string | null>(null);
+  const [resettingStale, setResettingStale] = useState(false);
   const [runs, setRuns] = useState<RunRow[]>([]);
   const [runTotal, setRunTotal] = useState(0);
   const [page, setPage] = useState(0);
@@ -192,7 +203,11 @@ export default function DashboardPage() {
 
   const loadStatus = useCallback(async () => {
     const res = await fetch('/api/status');
-    if (res.ok) setStatus((await res.json()) as Status);
+    if (res.ok) {
+      const data = (await res.json()) as Status;
+      setStatus(data);
+      setStale(data.stale ?? null);
+    }
   }, []);
 
   const loadRuns = useCallback(async () => {
@@ -432,6 +447,59 @@ export default function DashboardPage() {
     }
   }
 
+  async function resetStale() {
+    if (!stale || resettingStale) return;
+    setResettingStale(true);
+    try {
+      const res = await fetch('/api/actions/stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'reset' }),
+      });
+      if (!res.ok || !res.body) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        setStale({
+          message: `Reset could not be started: ${data.error ?? `HTTP ${res.status}`}`,
+          items: [],
+        });
+        return;
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let ok = false;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let nl = buffer.indexOf('\n');
+        while (nl >= 0) {
+          const line = buffer.slice(0, nl).trim();
+          buffer = buffer.slice(nl + 1);
+          nl = buffer.indexOf('\n');
+          if (!line) continue;
+          let msg: { type?: string; ok?: boolean };
+          try {
+            msg = JSON.parse(line) as typeof msg;
+          } catch {
+            continue;
+          }
+          if (msg.type === 'exit') ok = msg.ok === true;
+        }
+      }
+      if (ok) {
+        setStale(null);
+        setStaleDismissed(null);
+      } else {
+        setStale({ message: 'Reset did not complete cleanly. Try again.', items: [] });
+      }
+    } catch {
+      setStale({ message: 'Reset could not be started (network error).', items: [] });
+    } finally {
+      setResettingStale(false);
+    }
+  }
+
   async function controlDaemon(action: 'start' | 'stop' | 'restart') {
     setBusy(`daemon-${action}`);
     setOutput('');
@@ -599,6 +667,51 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-6">
+      {stale && staleDismissed !== stale.message && (
+        <div className="fixed bottom-4 right-4 z-50 w-[min(92vw,560px)]" role="alert">
+          <div className="rounded-lg border border-destructive/50 bg-destructive/10 p-4 shadow-lg">
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-destructive" />
+              <div className="min-w-0 flex-1 space-y-1">
+                <p className="text-sm font-semibold text-destructive">{stale.message}</p>
+                {stale.items.length > 0 && (
+                  <ul className="list-disc space-y-0.5 pl-4 text-xs text-muted-foreground">
+                    {stale.items.map((it) => (
+                      <li key={it}>{it}</li>
+                    ))}
+                  </ul>
+                )}
+                <div className="flex flex-wrap items-center gap-2 pt-1">
+                  <Button
+                    size="sm"
+                    variant="destructive"
+                    onClick={() => void resetStale()}
+                    disabled={resettingStale || !can('backup.run')}
+                  >
+                    {resettingStale ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <RotateCcw className="h-4 w-4" />
+                    )}
+                    Reset state
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => {
+                      setStaleDismissed(stale.message);
+                      setStale(null);
+                    }}
+                  >
+                    <X className="h-4 w-4" /> Dismiss
+                  </Button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
