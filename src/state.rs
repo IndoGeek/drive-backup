@@ -13,6 +13,8 @@ pub struct RunState {
     pub requires_manual_resume: bool,
     pub last_run_at: Option<String>,
     pub generation: u64,
+    #[serde(default)]
+    pub progress: Option<f64>,
 }
 
 impl Default for RunState {
@@ -27,6 +29,7 @@ impl Default for RunState {
             requires_manual_resume: false,
             last_run_at: None,
             generation: 0,
+            progress: None,
         }
     }
 }
@@ -65,6 +68,7 @@ impl RunState {
         self.requires_manual_resume = false;
         self.last_error = String::new();
         self.generation += 1;
+        self.progress = None;
     }
 
     pub fn mark_ok(&mut self, finished: String) {
@@ -73,6 +77,7 @@ impl RunState {
         self.finished_at = Some(finished.clone());
         self.last_run_at = Some(finished);
         self.requires_manual_resume = false;
+        self.progress = None;
     }
 
     pub fn mark_failed(&mut self, stage: &str, err: &str) {
@@ -80,6 +85,11 @@ impl RunState {
         self.status = "failed".into();
         self.last_error = err.into();
         self.requires_manual_resume = true;
+        self.progress = None;
+    }
+
+    pub fn set_progress(&mut self, p: f64) {
+        self.progress = Some(p.clamp(0.0, 100.0));
     }
 
     #[allow(dead_code)]

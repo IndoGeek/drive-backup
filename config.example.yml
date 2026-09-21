@@ -50,7 +50,9 @@ backup:
   # backups regardless of compression, so changing this only changes the name shape.
   timestamp_format: "%d-%m-%y_%H-%M"
 
-  # Max archives kept in the local staging dir before upload/prune.
+  # How many most-recent archives stay on this server. Keep 1 = the newest
+  # backup stays and every older one is pruned after a successful run.
+  # Counted by archive name prefix, so switching compression still prunes to this number.
   max_local_backups: 1
 
   # CRITICAL - glob patterns excluded from the archive (tar --exclude, relative to backup root).

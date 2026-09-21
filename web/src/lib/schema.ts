@@ -101,7 +101,7 @@ export const CONFIG_SECTIONS: Section[] = [
         key: 'backup.max_local_backups',
         label: 'Max local backups',
         type: 'number',
-        help: 'How many of your archives may stay in the local staging dir before older local copies are removed.\n\nCounted by prefix, regardless of the compression format — so switching from tar.zst to tar.gz still prunes to this number overall.\n\nThis only affects the local disk copy — the remote is untouched by it. 0 is normalised to 1.',
+        help: 'How many of the most recent backups stay on this server.\n\nKeep 1 → the newest archive stays, every older one is deleted after a successful backup. Keep 3 → the 3 newest archives stay, everything older is pruned.\n\nWorks across compression types, so switching from tar.zst to tar.gz still keeps only the newest ones. This only affects disk space here — the remote uses its own retention setting. 0 is normalised to 1.',
       },
       {
         key: 'backup.exclude_patterns',

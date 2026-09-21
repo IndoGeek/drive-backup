@@ -1,7 +1,9 @@
 use crate::config::{Config, SecondaryCfg};
 use crate::logger::Logger;
 use serde::Deserialize;
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::process::{Command, Output};
 
 #[derive(Clone, Debug)]
@@ -337,17 +339,56 @@ pub fn ensure_dir(r: &Remote) -> Result<(), String> {
     Ok(())
 }
 
-pub fn upload_file(r: &Remote, local: &Path, logger: &Logger) -> Result<(), String> {
+pub fn upload_file(
+    r: &Remote,
+    local: &Path,
+    logger: &Logger,
+    mut progress: Option<&mut dyn FnMut(f64)>,
+) -> Result<(), String> {
     ensure_dir(r)?;
     let remote = r.label();
     let name = local.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
     logger.info(&format!("uploading {} -> {}", name, remote));
-    let out = run_rclone(&["copy", &local.to_string_lossy(), &remote, "--no-check-dest"])?;
-    if !out.status.success() {
+    let conf = rclone_conf_path();
+    let mut child = Command::new("rclone")
+        .arg("copy")
+        .arg(local.as_os_str())
+        .arg(&remote)
+        .arg("--no-check-dest")
+        .arg("--stats")
+        .arg("1s")
+        .arg("--stats-one-line")
+        .arg("--use-json-log")
+        .arg("-v")
+        .env("RCLONE_CONFIG", &conf)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("failed to spawn rclone: {e}"))?;
+    let stderr = child.stderr.take().ok_or_else(|| "failed to capture rclone stderr".to_string())?;
+    let mut err_buf = String::new();
+    {
+        use std::io::BufRead;
+        for line in BufReader::new(stderr).lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(_) => break,
+            };
+            err_buf.push_str(&line);
+            err_buf.push('\n');
+            if let Some(pct) = rclone_stats_percent(&line) {
+                if let Some(cb) = progress.as_mut() {
+                    cb(pct);
+                }
+            }
+        }
+    }
+    if !child.wait().map_err(|e| format!("rclone wait failed: {e}"))?.success() {
         return Err(format!(
             "rclone copy to {} failed: {}",
             remote,
-            String::from_utf8_lossy(&out.stderr).trim()
+            err_buf.trim()
         ));
     }
     let local_size = std::fs::metadata(local).map(|m| m.len()).unwrap_or(0);
@@ -363,6 +404,17 @@ pub fn upload_file(r: &Remote, local: &Path, logger: &Logger) -> Result<(), Stri
         )),
         None => Err(format!("upload verification failed: {} not found on {}", name, remote)),
     }
+}
+
+fn rclone_stats_percent(line: &str) -> Option<f64> {
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    let stats = v.get("stats")?;
+    let total = stats.get("totalBytes")?.as_i64()?;
+    if total <= 0 {
+        return None;
+    }
+    let bytes = stats.get("bytes")?.as_i64()?;
+    Some((bytes.min(total) as f64 / total as f64) * 100.0)
 }
 
 pub fn delete_file(r: &Remote, name: &str) -> Result<(), String> {

@@ -18,6 +18,7 @@ export type StatusPayload = {
     requires_manual_resume: boolean;
     last_run_at: string | null;
     generation: number;
+    progress: number | null;
   };
   config: {
     backup_path: string;

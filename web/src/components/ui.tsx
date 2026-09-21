@@ -194,3 +194,34 @@ export function TD({ className, ...props }: React.TdHTMLAttributes<HTMLTableCell
 export function Separator({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
   return <div className={cn('h-px w-full bg-border', className)} {...props} />;
 }
+
+export function Progress({
+  value,
+  indeterminate,
+  className,
+}: {
+  value?: number;
+  indeterminate?: boolean;
+  className?: string;
+}) {
+  const pct = value == null ? 0 : Math.max(0, Math.min(100, value));
+  return (
+    <div
+      role="progressbar"
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={indeterminate ? undefined : value == null ? undefined : Math.round(pct)}
+      className={cn('relative h-2 w-full overflow-hidden rounded-full bg-secondary', className)}
+    >
+      <div
+        className={cn(
+          'h-full rounded-full bg-primary',
+          indeterminate
+            ? 'animate-progress-indeterminate w-2/5'
+            : 'transition-[width] duration-500 ease-out',
+        )}
+        style={indeterminate ? undefined : { width: `${pct}%` }}
+      />
+    </div>
+  );
+}

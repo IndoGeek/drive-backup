@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
+  Activity,
   CalendarClock,
   CheckCircle2,
   ChevronLeft,
@@ -35,6 +36,7 @@ import {
   CardTitle,
   Input,
   Label,
+  Progress,
   Select,
   Switch,
   TBody,
@@ -78,6 +80,7 @@ type Status = {
     requires_manual_resume: boolean;
     last_run_at: string | null;
     generation: number;
+    progress: number | null;
   };
   config: {
     backup_path: string;
@@ -153,6 +156,10 @@ function countdown(ms: number): string {
   return `${h}h ${m}m ${sec}s`;
 }
 
+function stageTitle(stage: string | undefined): string {
+  return (stage ?? '—').replace(/-/g, ' ');
+}
+
 function readPath(obj: Record<string, unknown>, dotted: string): unknown {
   return dotted.split('.').reduce<unknown>((acc, key) => {
     if (acc && typeof acc === 'object') return (acc as Record<string, unknown>)[key];
@@ -200,6 +207,14 @@ export default function DashboardPage() {
   const [savingSchedule, setSavingSchedule] = useState(false);
   const [scheduleMsg, setScheduleMsg] = useState<string | null>(null);
   const [scheduleError, setScheduleError] = useState<string | null>(null);
+
+  const state = status?.state;
+  const failed = Boolean(state?.requires_manual_resume) || state?.status === 'failed';
+  const inFlight = state?.status === 'running';
+  const progress = state?.progress ?? null;
+  const [transitioning, setTransitioning] = useState(false);
+  const prevStageRef = useRef<string | undefined>(undefined);
+  const statusInterval = inFlight ? 1500 : 5000;
 
   const loadStatus = useCallback(async () => {
     const res = await fetch('/api/status');
@@ -267,12 +282,10 @@ export default function DashboardPage() {
     void loadDaemon();
     void loadBinary();
     void attachConsole();
-    const t = setInterval(() => void loadStatus(), 5000);
     const t3 = setInterval(() => void loadDaemon(), 15000);
     const t4 = setInterval(() => void loadBinary(), 60000);
     const tick = setInterval(() => setNowMs(Date.now()), 1000);
     return () => {
-      clearInterval(t);
       clearInterval(t3);
       clearInterval(t4);
       clearInterval(tick);
@@ -282,6 +295,26 @@ export default function DashboardPage() {
       attachRef.current = null;
     };
   }, [loadStatus, loadSchedule, loadDaemon, loadBinary]);
+
+  useEffect(() => {
+    const t = setInterval(() => void loadStatus(), statusInterval);
+    return () => clearInterval(t);
+  }, [loadStatus, statusInterval]);
+
+  useEffect(() => {
+    if (!inFlight) {
+      setTransitioning(false);
+      prevStageRef.current = undefined;
+      return;
+    }
+    if (prevStageRef.current !== state?.stage) {
+      prevStageRef.current = state?.stage;
+      setTransitioning(true);
+      const t = setTimeout(() => setTransitioning(false), 700);
+      return () => clearTimeout(t);
+    }
+    return undefined;
+  }, [inFlight, state?.stage]);
 
   useEffect(() => {
     void loadRuns();
@@ -638,9 +671,6 @@ export default function DashboardPage() {
     }
   }
 
-  const state = status?.state;
-  const failed = Boolean(state?.requires_manual_resume) || state?.status === 'failed';
-  const inFlight = state?.status === 'running';
   const nextMs = status?.next_run_at ? new Date(status.next_run_at).getTime() : null;
 
   const daemonSchedule = status?.config.schedule ?? null;
@@ -837,22 +867,40 @@ export default function DashboardPage() {
           <CardHeader className="pb-2">
             <CardDescription>State</CardDescription>
             <CardTitle className="flex items-center gap-2 text-lg">
-              {
-}
               {failed ? (
                 <XCircle className="h-5 w-5 shrink-0 text-destructive" />
               ) : inFlight ? (
-                <Loader2 className="h-5 w-5 shrink-0 animate-spin text-primary" />
+                <Activity className="h-5 w-5 shrink-0 text-primary" />
               ) : (
                 <CheckCircle2 className="h-5 w-5 shrink-0 text-success" />
               )}
               <span className="truncate">{state?.stage ?? '—'}</span>
             </CardTitle>
           </CardHeader>
-          <CardContent className="text-xs text-muted-foreground">
-            <Badge variant={failed ? 'destructive' : inFlight ? 'secondary' : 'success'}>
-              {failed ? (state?.status ?? 'failed') : inFlight ? 'in progress' : (state?.status ?? 'ok')}
-            </Badge>
+          <CardContent className="space-y-2 text-xs text-muted-foreground">
+            {inFlight ? (
+              <>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="capitalize">{stageTitle(state?.stage)}</span>
+                  {progress != null ? (
+                    <span className="font-mono text-primary">{Math.round(progress)}%</span>
+                  ) : (
+                    <Badge variant="secondary">in progress</Badge>
+                  )}
+                </div>
+                {transitioning ? (
+                  <div className="flex h-2 items-center">
+                    <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                  </div>
+                ) : (
+                  <Progress value={progress ?? undefined} indeterminate={progress == null} />
+                )}
+              </>
+            ) : (
+              <Badge variant={failed ? 'destructive' : 'success'}>
+                {failed ? (state?.status ?? 'failed') : (state?.status ?? 'ok')}
+              </Badge>
+            )}
           </CardContent>
         </Card>
 

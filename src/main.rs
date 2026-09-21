@@ -452,10 +452,11 @@ fn run_backup(
     let upload_size = std::fs::metadata(&artifact).map(|m| m.len()).unwrap_or(0);
 
     if !opts.upload {
-        if !opts.keep_local {
-            let _ = std::fs::remove_file(&artifact);
+        if opts.keep_local {
+            logger.info("--keep-local: skipping local prune (all archives kept on disk)");
+        } else {
+            backup::prune_local(&local_dir, prefix, b.max_local_backups, logger);
         }
-        backup::prune_local(&local_dir, prefix, b.max_local_backups, logger);
         st.mark_ok(Utc::now().to_rfc3339());
         st.save(state_file)?;
         logger.info(if opts.keep_local {
@@ -467,6 +468,7 @@ fn run_backup(
     }
 
     st.stage = "uploading".into();
+    st.progress = None;
     st.save(state_file)?;
 
     let md5_opt = drive::local_md5(&artifact).ok();
@@ -477,10 +479,11 @@ fn run_backup(
     let remotes: Vec<Remote> = drive::active_remotes(cfg);
     let upload_to_all = cfg.inner.storage.upload_to_all;
     let mut uploaded = Vec::new();
+    let mut ok_remotes: Vec<&Remote> = Vec::new();
     let mut fallback_warn: Option<String> = None;
     let mut errors: Vec<String> = Vec::new();
 
-    let try_upload = |r: &Remote, logger: &Logger| -> Result<(), String> {
+    let try_upload = |r: &Remote, logger: &Logger, progress: Option<&mut dyn FnMut(f64)>| -> Result<(), String> {
         drive::ensure_remote_section(r, logger)?;
         if let Err(e) = drive::check_remote(r) {
             return Err(format!(
@@ -488,24 +491,22 @@ fn run_backup(
                 r.label()
             ));
         }
-        drive::upload_file(r, &artifact, logger)
+        drive::upload_file(r, &artifact, logger, progress)
     };
 
     if upload_to_all && !remotes.is_empty() {
         for r in &remotes {
-            match try_upload(r, logger) {
+            let mut prog = |p: f64| {
+                st.set_progress(p);
+                let _ = st.save(state_file);
+            };
+            match try_upload(r, logger, Some(&mut prog)) {
                 Ok(()) => {
                     uploaded.push(r.label());
+                    ok_remotes.push(r);
                     if let Some(h) = &md5_opt {
                         if let Some(d) = db() {
                             let _ = d.upsert_manifest(&artifact_name, upload_size as i64, h, &r.label(), &Utc::now().to_rfc3339(), stage_label);
-                        }
-                    }
-                    if let Ok(pruned) = drive::prune_remote(r, prefix, r.retention, logger) {
-                        if !pruned.is_empty() {
-                            if let Some(d) = db() {
-                                let _ = d.prune_manifest_removed(&pruned);
-                            }
                         }
                     }
                 }
@@ -527,22 +528,20 @@ fn run_backup(
         }
     } else if !remotes.is_empty() {
         for (idx, r) in remotes.iter().enumerate() {
-            match try_upload(r, logger) {
+            let mut prog = |p: f64| {
+                st.set_progress(p);
+                let _ = st.save(state_file);
+            };
+            match try_upload(r, logger, Some(&mut prog)) {
                 Ok(()) => {
                     uploaded.push(r.label());
+                    ok_remotes.push(r);
                     if idx > 0 {
                         fallback_warn = Some(r.label());
                     }
                     if let Some(h) = &md5_opt {
                         if let Some(d) = db() {
                             let _ = d.upsert_manifest(&artifact_name, upload_size as i64, h, &r.label(), &Utc::now().to_rfc3339(), stage_label);
-                        }
-                    }
-                    if let Ok(pruned) = drive::prune_remote(r, prefix, r.retention, logger) {
-                        if !pruned.is_empty() {
-                            if let Some(d) = db() {
-                                let _ = d.prune_manifest_removed(&pruned);
-                            }
                         }
                     }
                     break;
@@ -577,15 +576,29 @@ fn run_backup(
         logger.warn(&format!("primary remote failed; backup uploaded to fallback remote {}", fw));
     }
 
-    st.stage = "cleanup".into();
-    st.save(state_file)?;
-    if !opts.keep_local {
-        match std::fs::remove_file(&artifact) {
-            Ok(_) => logger.info(&format!("removed local archive {}", artifact.display())),
-            Err(e) => logger.warn(&format!("could not remove local archive {}: {e}", artifact.display())),
+    if !ok_remotes.is_empty() {
+        st.stage = "pruning".into();
+        st.progress = None;
+        st.save(state_file)?;
+        for r in &ok_remotes {
+            if let Ok(pruned) = drive::prune_remote(r, prefix, r.retention, logger) {
+                if !pruned.is_empty() {
+                    if let Some(d) = db() {
+                        let _ = d.prune_manifest_removed(&pruned);
+                    }
+                }
+            }
         }
     }
-    backup::prune_local(&local_dir, prefix, b.max_local_backups, logger);
+
+    st.stage = "cleanup".into();
+    st.progress = None;
+    st.save(state_file)?;
+    if opts.keep_local {
+        logger.info("--keep-local: skipping local prune (all archives kept on disk)");
+    } else {
+        backup::prune_local(&local_dir, prefix, b.max_local_backups, logger);
+    }
 
     if let Some(g) = server_guard.as_mut() {
         g.restart_now();
@@ -920,6 +933,7 @@ fn cmd_status_json(cfg: &Config) -> Result<(), String> {
             "requires_manual_resume": st.requires_manual_resume,
             "last_run_at": st.last_run_at,
             "generation": st.generation,
+            "progress": st.progress,
         },
         "config": {
             "backup_path": cfg.resolve(&b.path).to_string_lossy(),
