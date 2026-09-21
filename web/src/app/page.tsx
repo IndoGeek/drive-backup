@@ -179,6 +179,7 @@ export default function DashboardPage() {
   const [running, setRunning] = useState(false);
   const [lastResult, setLastResult] = useState<{ ok: boolean; code: number | null } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const attachRef = useRef<AbortController | null>(null);
   const consoleRef = useRef<HTMLPreElement | null>(null);
 
   const [mode, setMode] = useState<'even' | 'times'>('even');
@@ -250,6 +251,7 @@ export default function DashboardPage() {
     void loadSchedule();
     void loadDaemon();
     void loadBinary();
+    void attachConsole();
     const t = setInterval(() => void loadStatus(), 5000);
     const t3 = setInterval(() => void loadDaemon(), 15000);
     const t4 = setInterval(() => void loadBinary(), 60000);
@@ -259,6 +261,10 @@ export default function DashboardPage() {
       clearInterval(t3);
       clearInterval(t4);
       clearInterval(tick);
+      abortRef.current?.abort();
+      attachRef.current?.abort();
+      abortRef.current = null;
+      attachRef.current = null;
     };
   }, [loadStatus, loadSchedule, loadDaemon, loadBinary]);
 
@@ -342,8 +348,11 @@ export default function DashboardPage() {
         }
       }
     } catch (e) {
-      if ((e as Error).name === 'AbortError') append('\n[stopped]\n');
-      else append(`\n! ${e instanceof Error ? e.message : 'the panel could not reach the server'}\n`);
+      if ((e as Error).name === 'AbortError') {
+        append('\n[connection closed — the action keeps running and will be restored when you return]\n');
+      } else {
+        append(`\n! ${e instanceof Error ? e.message : 'the panel could not reach the server'}\n`);
+      }
       setLastResult((prev) => prev ?? { ok: false, code: null });
     } finally {
       setRunning(false);
@@ -351,6 +360,75 @@ export default function DashboardPage() {
       abortRef.current = null;
       await loadStatus();
       await loadRuns();
+    }
+  }
+
+  async function attachConsole() {
+    const controller = new AbortController();
+    attachRef.current = controller;
+    try {
+      const res = await fetch('/api/actions/attach', { signal: controller.signal });
+      if (!res.ok || !res.body) return;
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let nl = buffer.indexOf('\n');
+        while (nl >= 0) {
+          const line = buffer.slice(0, nl).trim();
+          buffer = buffer.slice(nl + 1);
+          nl = buffer.indexOf('\n');
+          if (!line) continue;
+          let msg: {
+            type?: string;
+            id?: string;
+            action?: string;
+            output?: string;
+            status?: string;
+            exit_code?: number | null;
+            ok?: boolean;
+            code?: number | null;
+            signal?: string | null;
+            data?: string;
+            message?: string;
+          };
+          try {
+            msg = JSON.parse(line) as typeof msg;
+          } catch {
+            continue;
+          }
+          if (msg.type === 'idle') return;
+          if (msg.type === 'snapshot') {
+            setOutput(msg.output ?? '');
+            const wasRunning = msg.status === 'running';
+            setRunning(wasRunning);
+            setBusy(wasRunning ? msg.action ?? 'running' : null);
+            setLastResult(
+              wasRunning ? null : { ok: msg.exit_code === 0, code: msg.exit_code ?? null },
+            );
+            continue;
+          }
+          if (msg.type === 'stdout' || msg.type === 'stderr') {
+            append(msg.data ?? '');
+          } else if (msg.type === 'error') {
+            append(`\n! ${msg.message ?? 'the action could not run'}\n`);
+          } else if (msg.type === 'exit') {
+            setRunning(false);
+            setBusy(null);
+            setLastResult({ ok: msg.ok === true, code: msg.code ?? null });
+            return;
+          }
+        }
+      }
+    } catch (e) {
+      if ((e as Error).name !== 'AbortError') {
+        append(`\n! ${e instanceof Error ? e.message : 'could not reconnect to the running action'}\n`);
+      }
+    } finally {
+      if (attachRef.current === controller) attachRef.current = null;
     }
   }
 
@@ -413,8 +491,28 @@ export default function DashboardPage() {
     }
   }
 
-  function stopRun() {
-    abortRef.current?.abort();
+  async function stopRun() {
+    setBusy('stop-run');
+    try {
+      const res = await fetch('/api/actions/stop', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const data = (await res.json()) as { stopped?: boolean; status?: string; error?: string };
+      if (!res.ok) {
+        append(`\n! ${data.error ?? `HTTP ${res.status}`}\n`);
+        return;
+      }
+      if (data.stopped) {
+        append('\n[stopped by user]\n');
+        setRunning(false);
+        setBusy(null);
+        setLastResult({ ok: false, code: null });
+      }
+    } finally {
+      setBusy(null);
+    }
   }
 
   async function saveSchedule() {

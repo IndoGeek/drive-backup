@@ -1,6 +1,7 @@
+import { NextResponse } from 'next/server';
 import { binaryPath } from '@/lib/panel';
-import { spawnAs } from '@/lib/instance';
 import { prepareAction, type ActionOptions } from '@/lib/actions';
+import { startAction, subscribeAction, type ActionLine } from '@/lib/action-store';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -19,13 +20,31 @@ export async function POST(req: Request) {
   if (!prepared.ok) return prepared.response;
   const { inst, args, command, timeout } = prepared;
 
+  const { action, alreadyRunning } = startAction(inst, {
+    action: body?.action ?? '',
+    args,
+    command: `${binaryPath()} ${[...args, '--config', inst.configPath].join(' ')}`,
+    timeout,
+  });
+  if (alreadyRunning) {
+    return NextResponse.json(
+      {
+        error: 'an action is already running for this instance',
+        running: true,
+        id: action.id,
+        action: action.action,
+        started_at: action.startedAt,
+      },
+      { status: 409 },
+    );
+  }
+
   const encoder = new TextEncoder();
-  const fullArgs = [...args, '--config', inst.configPath];
 
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       let closed = false;
-      const send = (message: Record<string, unknown>): void => {
+      const send = (message: unknown): void => {
         if (closed) return;
         try {
           controller.enqueue(encoder.encode(`${JSON.stringify(message)}\n`));
@@ -42,41 +61,24 @@ export async function POST(req: Request) {
         }
       };
 
-      send({ type: 'start', command });
+      send({ type: 'start', id: action.id, command });
 
-      let child: ReturnType<typeof spawnAs>;
-      try {
-        child = spawnAs(inst, binaryPath(), fullArgs);
-      } catch (e) {
-        send({ type: 'error', message: e instanceof Error ? e.message : String(e) });
-        finish();
-        return;
+      const relay = (line: ActionLine): void => {
+        send(line);
+        if (line.type === 'exit') finish();
+      };
+      const unsubscribe = subscribeAction(inst.root, relay);
+      if (action.status !== 'running') {
+        relay({
+          type: 'exit',
+          code: action.exitCode,
+          signal: action.signal,
+          ok: action.exitCode === 0,
+        });
       }
 
-      const timer = setTimeout(() => {
-        send({ type: 'stderr', data: `\n[timed out after ${timeout / 1000}s]\n` });
-        child.kill('SIGTERM');
-      }, timeout);
-
-      child.stdout.setEncoding('utf8');
-      child.stderr.setEncoding('utf8');
-      child.stdout.on('data', (chunk: string) => send({ type: 'stdout', data: chunk }));
-      child.stderr.on('data', (chunk: string) => send({ type: 'stderr', data: chunk }));
-
-      child.on('error', (err) => {
-        clearTimeout(timer);
-        send({ type: 'error', message: err.message });
-        finish();
-      });
-      child.on('close', (code, signal) => {
-        clearTimeout(timer);
-        send({ type: 'exit', code, signal, ok: code === 0 });
-        finish();
-      });
-
       req.signal.addEventListener('abort', () => {
-        clearTimeout(timer);
-        if (child.exitCode === null) child.kill('SIGTERM');
+        unsubscribe?.();
         finish();
       });
     },

@@ -76,9 +76,15 @@ type StreamMessage = {
   type: string;
   data?: string;
   code?: number | null;
+  signal?: string | null;
   ok?: boolean;
   command?: string;
   message?: string;
+  id?: string;
+  running?: boolean;
+  status?: string;
+  exit_code?: number | null;
+  output?: string;
 };
 
 async function readStream(res: Response): Promise<StreamMessage[][]> {
@@ -264,5 +270,197 @@ describe('the schedule keys', () => {
     expect(cfg.backup.times).toEqual([]);
     expect(cfg.backup.backups_per_day).toBe(2);
     expect(cfg.backup.time).toBe('03:30');
+  });
+});
+
+async function readUntilStarted(res: Response): Promise<{
+  messages: StreamMessage[];
+  reader: ReadableStreamDefaultReader<Uint8Array> | null;
+  decoder: TextDecoder;
+}> {
+  const reader = res.body!.getReader();
+  const decoder = new TextDecoder();
+  const messages: StreamMessage[] = [];
+  let buffer = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) return { messages, reader: null, decoder };
+    buffer += decoder.decode(value, { stream: true });
+    let nl = buffer.indexOf('\n');
+    while (nl >= 0) {
+      const line = buffer.slice(0, nl).trim();
+      buffer = buffer.slice(nl + 1);
+      nl = buffer.indexOf('\n');
+      if (line) messages.push(JSON.parse(line) as StreamMessage);
+    }
+    const text = messages
+      .filter((m) => m.type === 'stdout' || m.type === 'stderr')
+      .map((m) => m.data ?? '')
+      .join('');
+    if (text.includes('started')) return { messages, reader, decoder };
+  }
+}
+
+async function readAttach(res: Response): Promise<StreamMessage[]> {
+  const reader = res.body!.getReader();
+  const decoder = new TextDecoder();
+  const messages: StreamMessage[] = [];
+  let buffer = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let nl = buffer.indexOf('\n');
+    while (nl >= 0) {
+      const line = buffer.slice(0, nl).trim();
+      buffer = buffer.slice(nl + 1);
+      nl = buffer.indexOf('\n');
+      if (line) messages.push(JSON.parse(line) as StreamMessage);
+    }
+  }
+  return messages;
+}
+
+async function readRemaining(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  decoder: TextDecoder,
+): Promise<StreamMessage[]> {
+  const messages: StreamMessage[] = [];
+  let buffer = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let nl = buffer.indexOf('\n');
+    while (nl >= 0) {
+      const line = buffer.slice(0, nl).trim();
+      buffer = buffer.slice(nl + 1);
+      nl = buffer.indexOf('\n');
+      if (line) messages.push(JSON.parse(line) as StreamMessage);
+    }
+  }
+  return messages;
+}
+
+describe('persistent actions across disconnects', () => {
+  const SLOW = ['#!/bin/sh', 'echo "started"', 'sleep 1.2', 'echo "middle"', 'sleep 1.2', 'echo "done"', 'exit 0'].join(
+    '\n',
+  );
+
+  async function withBin<T>(name: string, body: string, fn: () => Promise<T>): Promise<T> {
+    const bin = path.join(binDir, name);
+    fs.writeFileSync(bin, body + '\n', { mode: 0o755 });
+    const original = process.env.BACKUP_MGR_BIN;
+    process.env.BACKUP_MGR_BIN = bin;
+    try {
+      return await fn();
+    } finally {
+      process.env.BACKUP_MGR_BIN = original;
+    }
+  }
+
+  function attachRequest() {
+    return new Request('http://test/api/actions/attach', { headers: { cookie } }) as never;
+  }
+
+  function stopRequest() {
+    return new Request('http://test/api/actions/stop', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({}),
+    }) as never;
+  }
+
+  it('serves a snapshot of a finished action instead of dropping it' , { timeout: 15000 }, async () => {
+    const { POST } = await import('@/app/api/actions/stream/route');
+    const run = (await POST(streamRequest({ action: 'check' }))) as unknown as Response;
+    const runFlat = (await readStream(run)).flat();
+    const exit = runFlat[runFlat.length - 1];
+    expect(exit.type).toBe('exit');
+    expect(exit.ok).toBe(true);
+
+    const { GET } = await import('@/app/api/actions/attach/route');
+    const res = (await GET(attachRequest())) as unknown as Response;
+    expect(res.status).toBe(200);
+    const messages = await readAttach(res);
+    expect(messages[0].type).toBe('snapshot');
+    expect(messages[0].status).toBe('ok');
+    expect(messages[0].exit_code).toBe(0);
+    expect(messages[0].output ?? '').toContain('finished');
+    expect(messages).toHaveLength(1);
+  });
+
+  it('keeps a running action alive across a disconnect and lets a new tab re-attach' , { timeout: 20000 }, async () => {
+    await withBin('slow-run', SLOW, async () => {
+      const { POST } = await import('@/app/api/actions/stream/route');
+      const run = (await POST(streamRequest({ action: 'check' }))) as unknown as Response;
+      const got = await readUntilStarted(run);
+      expect(got.messages.some((m) => m.type === 'stdout')).toBe(true);
+      await got.reader!.cancel();
+
+      const { GET } = await import('@/app/api/actions/attach/route');
+      const res = (await GET(attachRequest())) as unknown as Response;
+      expect(res.status).toBe(200);
+      const messages = await readAttach(res);
+      const snapshot = messages[0];
+      expect(snapshot.type).toBe('snapshot');
+      expect(snapshot.status).toBe('running');
+      const output = snapshot.output ?? '';
+      expect(output).toContain('started');
+      expect(output).not.toContain('done');
+
+      const last = messages[messages.length - 1];
+      expect(last.type).toBe('exit');
+      expect(last.ok).toBe(true);
+    });
+  });
+
+  it('refuses to start a second action while one is already running' , { timeout: 20000 }, async () => {
+    await withBin('doubler', SLOW, async () => {
+      const { POST } = await import('@/app/api/actions/stream/route');
+      const first = (await POST(streamRequest({ action: 'check' }))) as unknown as Response;
+      const got = await readUntilStarted(first);
+
+      const second = (await POST(streamRequest({ action: 'check' }))) as unknown as Response;
+      expect(second.status).toBe(409);
+      const body = (await (second as unknown as Response).json()) as {
+        running?: boolean;
+        id?: string;
+        error?: string;
+      };
+      expect(body.running).toBe(true);
+      expect(typeof body.id).toBe('string');
+
+      const rest = await readRemaining(got.reader!, got.decoder);
+      const last = rest[rest.length - 1];
+      expect(last.type).toBe('exit');
+    });
+  });
+
+  it('stops a running action via the stop endpoint' , { timeout: 20000 }, async () => {
+    await withBin('stoppable', SLOW, async () => {
+      const { POST } = await import('@/app/api/actions/stream/route');
+      const run = (await POST(streamRequest({ action: 'check' }))) as unknown as Response;
+      const got = await readUntilStarted(run);
+
+      const { POST: stop } = await import('@/app/api/actions/stop/route');
+      const res = (await stop(stopRequest())) as unknown as Response;
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { stopped?: boolean; status?: string };
+      expect(body.stopped).toBe(true);
+      expect(body.status).toBe('running');
+
+      const rest = await readRemaining(got.reader!, got.decoder);
+      const last = rest[rest.length - 1];
+      expect(last.type).toBe('exit');
+      expect(last.ok).toBe(false);
+      expect(last.signal).toBe('SIGTERM');
+
+      const { GET } = await import('@/app/api/actions/attach/route');
+      const attach = (await GET(attachRequest())) as unknown as Response;
+      const snapshot = (await readAttach(attach))[0];
+      expect(snapshot.status).toBe('failed');
+      expect(snapshot.signal).toBe('SIGTERM');
+    });
   });
 });

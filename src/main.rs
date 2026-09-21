@@ -927,7 +927,15 @@ fn cmd_fix_perms(cfg: &Config, logger: &Logger, user: Option<String>) -> Result<
 
 fn cmd_reset(cfg: &Config) -> Result<(), String> {
     let state_file = cfg.resolve(&cfg.inner.state.file);
+    let state_dir = state_file.parent().map(Path::to_path_buf).unwrap_or_default();
     RunState::reset(&state_file)?;
+    let lock = state_dir.join(LOCK_NAME);
+    if lock.is_dir() {
+        match std::fs::remove_dir(&lock) {
+            Ok(_) => println!("cleared stale run lock: {}", lock.display()),
+            Err(e) => println!("could not clear run lock {}: {}", lock.display(), e),
+        }
+    }
     println!("state reset -> idle/ok");
     Ok(())
 }
