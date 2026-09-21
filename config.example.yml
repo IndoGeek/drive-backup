@@ -46,7 +46,8 @@ backup:
   # When set, these are the schedule: time/backups_per_day are ignored.
   times: []
 
-  # CRITICAL - timestamp tokens in archive names. Changing this breaks retention pruning.
+  # CRITICAL - timestamp tokens in archive names. Retention keeps the newest N
+  # backups regardless of compression, so changing this only changes the name shape.
   timestamp_format: "%d-%m-%y_%H-%M"
 
   # Max archives kept in the local staging dir before upload/prune.

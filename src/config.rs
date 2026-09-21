@@ -46,6 +46,8 @@ pub struct BackupCfg {
     pub dir: String,
     #[serde(default = "default_compression")]
     pub compression: String,
+    #[serde(default)]
+    pub compression_level: Option<i64>,
     #[serde(default = "default_time")]
     pub time: String,
     #[serde(default = "default_bpd")]
@@ -429,6 +431,10 @@ impl Config {
         }
         let c = self.inner.backup.compression.trim().to_lowercase();
         self.inner.backup.compression = c;
+        if let Some(mut lvl) = self.inner.backup.compression_level {
+            lvl = lvl.clamp(0, 9);
+            self.inner.backup.compression_level = Some(lvl);
+        }
         if self.inner.backup.backups_per_day == 0 {
             self.inner.backup.backups_per_day = 1;
         }
@@ -485,6 +491,21 @@ backup:
   # Compression. Empty defaults to "tar.gz".
   # Supported: tar | tar.gz | tar.zst | tar.xz | tar.bz2 | zip
   compression: "tar.gz"
+
+  # Compression level 0-9. Leave unset (or 0) to use each tool's native default.
+  # Higher = smaller archive but slower and more CPU. Lower = faster, larger.
+  #   0 = store only (no compression) — gzip/xz/zip support this; bz2/zstd clamp to their minimum
+  #   1 = fastest, largest
+  #   6 = gzip/xz/zip default level
+  #   9 = slowest, best ratio
+  # Per-type native levels passed to the tool:
+  #   gzip (tar.gz):  0-9  (default 6)
+  #   zip:            0-9  (default 6)
+  #   xz:             0-9  (default 6)
+  #   bz2:            1-9  (default 9)
+  #   zstd:           1-19 (default 3; our 0-9 maps into 1-19)
+  #   tar:            ignored (no compression)
+  # compression_level: 6
 
   # Time of the first daily backup (24h, HH:MM) in the configured timezone.
   time: "03:30"

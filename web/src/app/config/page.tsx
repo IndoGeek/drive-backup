@@ -66,7 +66,9 @@ function FieldControl({
       return (
         <Input
           type="number"
-          step="any"
+          step={field.step ?? 'any'}
+          min={field.min}
+          max={field.max}
           value={value === undefined || value === null ? '' : String(value)}
           onChange={(e) => onChange(e.target.value)}
           disabled={disabled}

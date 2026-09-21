@@ -74,11 +74,37 @@ fn require_binary(bin: &str, must: bool) -> Result<(), String> {
     Ok(())
 }
 
+pub fn zstd_level(level: u32) -> u32 {
+    match level.clamp(0, 9) {
+        0 | 1 => 1,
+        2 => 3,
+        3 => 5,
+        4 => 7,
+        5 => 9,
+        6 => 11,
+        7 => 13,
+        8 => 16,
+        _ => 19,
+    }
+}
+
+pub fn compress_program(compression: &str, level: u32) -> Option<String> {
+    match compression {
+        "tar" => None,
+        "tar.gz" => Some(format!("gzip -{}", level.clamp(0, 9))),
+        "tar.xz" => Some(format!("xz -{}", level.clamp(0, 9))),
+        "tar.bz2" => Some(format!("bzip2 -{}", level.clamp(1, 9))),
+        "tar.zst" => Some(format!("zstd -{}", zstd_level(level))),
+        _ => None,
+    }
+}
+
 pub fn compress_dir(
     src_dir: &Path,
     sub_dir: Option<&Path>,
     dst_file: &Path,
     compression: &str,
+    level: Option<u32>,
     excludes: &[String],
     logger: &Logger,
 ) -> Result<u64, String> {
@@ -111,27 +137,40 @@ pub fn compress_dir(
 
     let mut cmd = Command::new(if compression == "zip" { "zip" } else { "tar" });
     if compression == "zip" {
-        let args: Vec<String> = {
-            let mut a = vec![
-                "-r".to_string(),
-                partial.to_string_lossy().to_string(),
-                ".".to_string(),
-            ];
-            a.extend(excludes.iter().map(|p| format!("-x {}", p)));
-            a
-        };
+        let mut args: Vec<String> = vec!["-r".to_string()];
+        if let Some(l) = level {
+            args.push(format!("-{}", l.clamp(0, 9)));
+        }
+        args.push(partial.to_string_lossy().to_string());
+        args.push(".".to_string());
+        args.extend(excludes.iter().map(|p| format!("-x {}", p)));
         cmd.current_dir(&root).args(&args);
     } else {
-        let flag = match compression {
-            "tar" => "-cf",
-            "tar.gz" => "-czf",
-            "tar.zst" => "--zstd -cf",
-            "tar.bz2" => "-cjf",
-            "tar.xz" => "-cJf",
-            _ => "-czf",
+        let mut args: Vec<String> = match (level, compression) {
+            (Some(l), _) => {
+                let mut a = vec!["-cf".to_string(), partial.to_string_lossy().to_string()];
+                if let Some(prog) = compress_program(compression, l) {
+                    a.push(format!("--use-compress-program={prog}"));
+                }
+                a
+            }
+            _ => {
+                let mut a: Vec<String> = if compression == "tar.zst" {
+                    vec!["--zstd".to_string(), "-cf".to_string()]
+                } else {
+                    vec![match compression {
+                        "tar" => "-cf",
+                        "tar.gz" => "-czf",
+                        "tar.bz2" => "-cjf",
+                        "tar.xz" => "-cJf",
+                        _ => "-czf",
+                    }
+                    .to_string()]
+                };
+                a.push(partial.to_string_lossy().to_string());
+                a
+            }
         };
-        let mut args: Vec<String> = flag.split_whitespace().map(String::from).collect();
-        args.push(partial.to_string_lossy().to_string());
 
         args.push("--ignore-failed-read".to_string());
         for p in excludes {
@@ -141,10 +180,15 @@ pub fn compress_dir(
         cmd.current_dir(&root).args(&args);
     }
 
+    let level_label = match level {
+        Some(l) => format!("level {l}"),
+        None => "tool default level".to_string(),
+    };
     logger.info(&format!(
-        "compressing {} ({} -> {})",
+        "compressing {} ({} at {}) -> {}",
         root.display(),
         compression,
+        level_label,
         dst_file.file_name().unwrap_or_default().to_string_lossy()
     ));
     let out = cmd
@@ -270,6 +314,87 @@ pub fn matches_pattern(name: &str, pattern: &str) -> bool {
     glob_match(&s, &p)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{compress_program, normalize_compression, zstd_level};
+
+    #[test]
+    fn zstd_level_maps_our_scale_into_native_range() {
+        assert_eq!(zstd_level(0), 1);
+        assert_eq!(zstd_level(1), 1);
+        assert_eq!(zstd_level(2), 3);
+        assert_eq!(zstd_level(3), 5);
+        assert_eq!(zstd_level(6), 11);
+        assert_eq!(zstd_level(9), 19);
+        assert_eq!(zstd_level(99), 19);
+    }
+
+    #[test]
+    fn compress_program_passes_native_levels_for_each_tool() {
+        assert_eq!(compress_program("tar", 6), None);
+        assert_eq!(compress_program("tar.gz", 0), Some("gzip -0".into()));
+        assert_eq!(compress_program("tar.gz", 6), Some("gzip -6".into()));
+        assert_eq!(compress_program("tar.xz", 9), Some("xz -9".into()));
+        assert_eq!(compress_program("tar.bz2", 0), Some("bzip2 -1".into()));
+        assert_eq!(compress_program("tar.bz2", 9), Some("bzip2 -9".into()));
+        assert_eq!(compress_program("tar.zst", 6), Some("zstd -11".into()));
+        assert_eq!(compress_program("tar.zst", 9), Some("zstd -19".into()));
+        assert_eq!(compress_program("zip", 6), None);
+    }
+
+    #[test]
+    fn normalize_compression_still_ranges_over_known_types() {
+        assert_eq!(normalize_compression("GZ"), "tar.gz");
+        assert_eq!(normalize_compression("zip"), "zip");
+        assert_eq!(normalize_compression("tar.br2"), "tar.br2");
+    }
+}
+
+#[cfg(test)]
+mod prune_tests {
+    use super::prune_local;
+    use std::fs;
+    use std::path::Path;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    fn touch_set(p: &Path, secs: u64) {
+        fs::write(p, b"x").unwrap();
+        let f = fs::File::open(p).unwrap();
+        f.set_modified(UNIX_EPOCH + Duration::from_secs(secs)).unwrap();
+    }
+
+    #[test]
+    fn keeps_only_the_newest_backups_across_compression_types() {
+        let root = std::env::temp_dir().join(format!("bm-prune-{}", std::process::id()));
+        let dir = root.join("staging");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&dir).unwrap();
+
+        touch_set(&dir.join("bund_20-09-26_01-44.tar.zst"), 1_000);
+        touch_set(&dir.join("bund_21-09-26_18-01.tar.zst"), 2_000);
+        touch_set(&dir.join("bund_21-09-26_18-54.tar.gz"), 3_000);
+        touch_set(&dir.join("mcworld_21-09-26_06-00.tar.gz"), 2_500);
+        touch_set(&dir.join("unrelated.txt"), 4_000);
+
+        let logger = crate::logger::Logger::new(&root.join("logs").to_string_lossy(), "error", 1).unwrap();
+        let removed = prune_local(&dir, "bund", 2, &logger);
+        let names: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+
+        assert_eq!(removed.len(), 1, "only one bund backup is beyond keep=2");
+        assert!(!names.contains(&"bund_20-09-26_01-44.tar.zst".to_string()), "oldest .zst was pruned");
+        assert!(names.contains(&"bund_21-09-26_18-01.tar.zst".to_string()), "newer .zst kept");
+        assert!(names.contains(&"bund_21-09-26_18-54.tar.gz".to_string()), "newest .tar.gz kept");
+        assert!(names.contains(&"mcworld_21-09-26_06-00.tar.gz".to_string()), "different prefix untouched");
+        assert!(names.contains(&"unrelated.txt".to_string()), "non-backup file untouched");
+        assert_eq!(names.len(), 4, "world + unrelated files are untouched");
+        fs::remove_dir_all(&root).unwrap();
+    }
+}
+
 fn excluded(path: &Path, root: &Path, excludes: &[String]) -> bool {
     let rel = path
         .strip_prefix(root)
@@ -330,15 +455,20 @@ pub fn human_size(bytes: u64) -> String {
     }
 }
 
-pub fn prune_local(dir: &Path, ext: &str, keep: usize, logger: &Logger) -> Vec<PathBuf> {
+pub fn prune_local(dir: &Path, prefix: &str, keep: usize, logger: &Logger) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
+    let pfx = format!("{}_", prefix);
     let mut archives: Vec<(std::fs::Metadata, PathBuf)> = entries
         .flatten()
         .filter_map(|e| {
             let p = e.path();
-            if !p.is_file() || !p.to_string_lossy().ends_with(ext) {
+            if !p.is_file() {
+                return None;
+            }
+            let name = p.file_name().unwrap_or_default().to_string_lossy();
+            if !name.starts_with(&pfx) {
                 return None;
             }
             Some((std::fs::metadata(&p).ok()?, p))

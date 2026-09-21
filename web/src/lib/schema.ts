@@ -14,6 +14,9 @@ export type Field = {
   help?: string;
   options?: string[];
   placeholder?: string;
+  min?: number;
+  max?: number;
+  step?: number;
 };
 
 export type Section = {
@@ -58,7 +61,7 @@ export const CONFIG_SECTIONS: Section[] = [
         key: 'backup.prefix',
         label: 'Archive prefix',
         type: 'string',
-        help: "First part of every full-archive name.\n\nWith prefix \"mc\" a backup becomes mc_12-09-26_03-30.tar.gz. Use it to tell your own archives apart on the remote, and to avoid clashing with other servers that share the same Drive folder.",
+        help: "First part of every full-archive name.\n\nWith prefix \"mc\" a backup becomes mc_12-09-26_03-30.tar.gz. Use it to tell your own archives apart on the remote, and to avoid clashing with other servers that share the same Drive folder.\n\nLocal keep and remote retention count your backups by this prefix, so archives stay counted even if you switch compression later.",
       },
       {
         key: 'backup.path',
@@ -80,6 +83,15 @@ export const CONFIG_SECTIONS: Section[] = [
         help: 'Archive format.\n\n- tar — no compression: fastest but largest files\n- tar.gz — gzip: fast, well supported (recommended)\n- tar.zst — zstd: better ratio with modern tooling\n- tar.xz, tar.bz2 — smaller archives, slower to create\n- zip — interoperable with other tools\n\nThe same files stay consistent (a valid archive) for all of these.',
       },
       {
+        key: 'backup.compression_level',
+        label: 'Compression level',
+        type: 'number',
+        min: 0,
+        max: 9,
+        step: 1,
+        help: 'How hard to compress the archive: 0-9.\n\n• Lower = FASTER to create, but LARGER archives\n• Higher = SLOWER to create, but SMALLER archives\n• 0 = store only (no compression at all, where supported)\n\nLeave EMPTY to use each tool’s built-in default.\n\nSpeed vs size grows smoothly both ways: pick 1-3 when speed matters, 7-9 when size/upload time matters more.\n\nWhat each compression type does with your level:\n\n• tar — no compression; the level is ignored entirely\n• tar.gz (gzip) — native levels 0-9, default 6: gzip -0 (store) … -6 (default balance) … -9 (best, noticeably slower than -1)\n• zip — native levels 0-9, default 6: zip -0 (store) … -6 (default) … -9 (best)\n• tar.xz (xz) — native levels 0-9, default 6: xz -0 (store) … -6 (default) … -9 (best; very slow at high levels)\n• tar.bz2 (bzip2) — native levels 1-9, default 9 (level 0 is treated as 1): -1 fastest … -9 slowest/best\n• tar.zst (zstd) — native levels 1-19, default 3. Our 0-9 scale maps to native zstd: 0-1 → 1, 2 → 3, 3 → 5, 4 → 7, 5 → 9, 6 → 11, 7 → 13, 8 → 16, 9 → 19',
+      },
+      {
         key: 'backup.timestamp_format',
         label: 'Timestamp format',
         type: 'string',
@@ -89,7 +101,7 @@ export const CONFIG_SECTIONS: Section[] = [
         key: 'backup.max_local_backups',
         label: 'Max local backups',
         type: 'number',
-        help: 'How many archives may stay in the local staging dir before older local copies are removed.\n\nThis only affects the local disk copy — the remote is untouched by it. 0 is normalised to 1.',
+        help: 'How many of your archives may stay in the local staging dir before older local copies are removed.\n\nCounted by prefix, regardless of the compression format — so switching from tar.zst to tar.gz still prunes to this number overall.\n\nThis only affects the local disk copy — the remote is untouched by it. 0 is normalised to 1.',
       },
       {
         key: 'backup.exclude_patterns',
@@ -206,7 +218,7 @@ export const CONFIG_SECTIONS: Section[] = [
         key: 'google_drive.retention',
         label: 'Retention (archives kept)',
         type: 'number',
-        help: 'How many of the most recent archives to keep on the primary remote.\n\nAfter a successful run, older archives beyond this number are pruned from the remote.',
+        help: 'How many of the most recent archives to keep on the primary remote.\n\nCounted by prefix, regardless of the compression format — so switching from tar.zst to tar.gz still prunes to this number overall. After a successful run, older archives beyond this number are pruned from the remote.',
       },
       {
         key: 'google_drive.client_id',
@@ -266,7 +278,7 @@ export const CONFIG_SECTIONS: Section[] = [
         key: 'storage.secondary.retention',
         label: 'Secondary retention',
         type: 'number',
-        help: 'How many of the most recent archives to keep on the secondary remote.',
+        help: 'How many of the most recent archives to keep on the secondary remote.\n\nAlso counted by prefix regardless of compression format, just like the primary retention.',
       },
       {
         key: 'storage.secondary.client_id',
@@ -526,7 +538,10 @@ export function coerce(field: Field, value: unknown): unknown {
     case 'number': {
       if (value === '' || value === null || value === undefined) return undefined;
       const n = Number(value);
-      return Number.isFinite(n) ? n : undefined;
+      if (!Number.isFinite(n)) return undefined;
+      if (field.min !== undefined && n < field.min) return field.min;
+      if (field.max !== undefined && n > field.max) return field.max;
+      return n;
     }
     case 'boolean':
       return value === true || value === 'true' || value === 'on' || value === 1;

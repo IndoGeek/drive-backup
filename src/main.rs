@@ -271,6 +271,7 @@ fn run_backup(
     std::fs::create_dir_all(&local_dir).map_err(|e| e.to_string())?;
 
     let compression = backup::normalize_compression(&b.compression);
+    let level: Option<u32> = b.compression_level.map(|v| v.clamp(0, 9) as u32);
     let ext = backup::extension_for(&compression)
         .ok_or_else(|| format!("unsupported compression type in config.yml: {}", b.compression))?;
     let prefix = if is_world { &w.prefix } else { &b.prefix };
@@ -287,7 +288,6 @@ fn run_backup(
     } else {
         base_name.clone()
     };
-    let prune_ext = if encrypted { ".gpg" } else { ext };
     let sub_dir = if is_world {
         Some(Path::new(&w.world_folder))
     } else {
@@ -412,7 +412,7 @@ fn run_backup(
         st.stage = "compressing".into();
         st.save(state_file)?;
     }
-    if let Err(e) = backup::compress_dir(&src, sub_dir, &base_dst, &compression, &b.exclude_patterns, logger) {
+    if let Err(e) = backup::compress_dir(&src, sub_dir, &base_dst, &compression, level, &b.exclude_patterns, logger) {
         db_record(stage_label, &base_name, None, None, "-", "failed", &e);
         metrics_run(false, 0, start_inst.elapsed(), &base_name);
         return fail(cfg, state_file, &mut st, logger, "compressing", &e);
@@ -455,7 +455,7 @@ fn run_backup(
         if !opts.keep_local {
             let _ = std::fs::remove_file(&artifact);
         }
-        backup::prune_local(&local_dir, prune_ext, b.max_local_backups, logger);
+        backup::prune_local(&local_dir, prefix, b.max_local_backups, logger);
         st.mark_ok(Utc::now().to_rfc3339());
         st.save(state_file)?;
         logger.info(if opts.keep_local {
@@ -501,7 +501,7 @@ fn run_backup(
                             let _ = d.upsert_manifest(&artifact_name, upload_size as i64, h, &r.label(), &Utc::now().to_rfc3339(), stage_label);
                         }
                     }
-                    if let Ok(pruned) = drive::prune_remote(r, prune_ext, r.retention, logger) {
+                    if let Ok(pruned) = drive::prune_remote(r, prefix, r.retention, logger) {
                         if !pruned.is_empty() {
                             if let Some(d) = db() {
                                 let _ = d.prune_manifest_removed(&pruned);
@@ -538,7 +538,7 @@ fn run_backup(
                             let _ = d.upsert_manifest(&artifact_name, upload_size as i64, h, &r.label(), &Utc::now().to_rfc3339(), stage_label);
                         }
                     }
-                    if let Ok(pruned) = drive::prune_remote(r, prune_ext, r.retention, logger) {
+                    if let Ok(pruned) = drive::prune_remote(r, prefix, r.retention, logger) {
                         if !pruned.is_empty() {
                             if let Some(d) = db() {
                                 let _ = d.prune_manifest_removed(&pruned);
@@ -585,7 +585,7 @@ fn run_backup(
             Err(e) => logger.warn(&format!("could not remove local archive {}: {e}", artifact.display())),
         }
     }
-    backup::prune_local(&local_dir, prune_ext, b.max_local_backups, logger);
+    backup::prune_local(&local_dir, prefix, b.max_local_backups, logger);
 
     if let Some(g) = server_guard.as_mut() {
         g.restart_now();
@@ -926,6 +926,7 @@ fn cmd_status_json(cfg: &Config) -> Result<(), String> {
             "backup_dir": cfg.resolve(&b.dir).to_string_lossy(),
             "log_dir": cfg.resolve(&cfg.inner.logging.dir).to_string_lossy(),
             "compression": b.compression,
+            "compression_level": b.compression_level,
             "time": b.time,
             "backups_per_day": b.backups_per_day,
 

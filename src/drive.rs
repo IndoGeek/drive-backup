@@ -378,11 +378,12 @@ pub fn delete_file(r: &Remote, name: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub fn prune_remote(r: &Remote, ext: &str, retention: u32, logger: &Logger) -> Result<Vec<String>, String> {
+pub fn prune_remote(r: &Remote, prefix: &str, retention: u32, logger: &Logger) -> Result<Vec<String>, String> {
     let files = list_backups(r)?;
+    let pfx = format!("{}_", prefix.trim().to_lowercase());
     let mut ours: Vec<RemoteFile> = files
         .into_iter()
-        .filter(|f| !f.IsDir && f.Name.to_lowercase().ends_with(ext))
+        .filter(|f| !f.IsDir && f.Name.to_lowercase().starts_with(&pfx))
         .collect();
     ours.sort_by(|a, b| b.ModTime.cmp(&a.ModTime));
     let mut deleted = Vec::new();
