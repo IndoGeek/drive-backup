@@ -1,157 +1,174 @@
 # Drive Backup
 
-Automatically archive a folder, upload it to Google Drive (optionally a second remote too) and get
+Archive a folder on a schedule, upload it to Google Drive (and optionally a second remote), and get
 told on Discord. Built for Linux VPSes, tested against Pterodactyl/Minecraft servers.
 
-Two parts:
+- **`backup-mgr`** — Rust CLI and daemon: compress → encrypt → upload → verify → prune → restore.
+- **`web/`** — Next.js panel: configure, authorize remotes, run, schedule, restore, watch logs.
+  Panel reference: [`web/README.md`](web/README.md).
 
-- **`backup-mgr`** — the Rust CLI and scheduler daemon: compress → encrypt (optional) → upload →
-  verify → prune → restore.
-- **`web/`** — a Next.js control panel: configure, authorize remotes, run and schedule backups,
-  restore, and watch logs from any browser.
-
-Full panel documentation is in [`web/README.md`](web/README.md).
-
-## 1. Requirements
-
-| | |
-| --- | --- |
-| Linux, **Rust 1.78+** (`rustup update stable`) | the committed `Cargo.lock` is v4; older cargo refuses it |
-| **Node 20+** and `npm` | the panel |
-| `rclone` | uploads — `apt install rclone` |
-| `acl` | non-root access to the source folder — `apt install acl` |
-| `pm2` (optional) | keeps the daemon and panel running — `npm i -g pm2` |
-| `gnupg` (optional) | only for `encrypt.enabled` |
-| `build-essential python3` (optional) | only if `npm install` fails building `better-sqlite3` |
-
-## 2. Install
+## Install
 
 ```bash
-git clone <this-repo> drive-backup && cd drive-backup
+# Debian/Ubuntu — rclone uploads, acl is for non-root access to the source folder
+sudo apt update && sudo apt install -y rclone acl
 
-# Rust binary
+# Rust 1.78+, Node 20+ (only the panel needs Node)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh && . "$HOME/.cargo/env"
+```
+
+Download or clone this project, then:
+
+```bash
 cargo build --release
 sudo install -m 0755 target/release/backup-mgr /usr/local/bin/backup-mgr
 
-# Configuration — the file is documented inline, line by line
-cp config.example.yml config.yml
-nano config.yml          # set backup.path, google_drive.dir, timezone, time, …
+cp config.example.yml config.yml     # edit: backup.path, google_drive.dir, timezone, time
+nano config.yml
 
-# Authorize the Google Drive remote (opens a browser link, then writes rclone.conf)
-backup-mgr remote-auth --config config.yml
-
-# Non-root only: grant read access to the folder you back up
-sudo ./scripts/grant-access.sh "$USER" /path/to/backups-parent-dir
-
-# First checks, then a real run
-backup-mgr check --config config.yml
-backup-mgr run   --config config.yml
-
-# Run it on a schedule
-pm2 start ecosystem.config.cjs && pm2 save
+backup-mgr remote-auth --config config.yml            # authorize Google Drive (browser link)
+sudo ./scripts/grant-access.sh "$USER" /path/to/data  # non-root only: read the source folder
+backup-mgr check --config config.yml                  # listing works, remotes reachable
+backup-mgr run --no-upload --config config.yml        # first real run, still without uploading
+backup-mgr run --config config.yml                    # now the real thing
 ```
 
-If `config.yml` is missing, the first command creates a fully commented default (mode `0600`) and
-tells you to review it. `config.yml`, `rclone.conf`, `history.db`, `state.json`, `logs/`, `backup/`
-and the panel's `web/data/` are all git-ignored — **never commit or paste them**, they hold your
-OAuth token, encryption passphrase and Discord webhook.
+If `config.yml` is missing, the first command writes a documented default (mode `0600`) and asks you
+to review it. `config.yml`, `rclone.conf`, `history.db`, `state.json`, `logs/`, `backup/` and
+`web/data/` are git-ignored — they hold your OAuth token, passphrase and webhook, so never commit or
+paste them.
 
-### The web panel
+Keep it running (optional but recommended):
+
+```bash
+npm i -g pm2
+pm2 start ecosystem.config.cjs && pm2 save     # backup-mgr
+pm2 startup                                    # run the printed command, so it survives a reboot
+```
+
+### Web panel
 
 ```bash
 cd web && npm install && npm run build && cd ..
-pm2 start ecosystem.frontend.config.cjs   # app name: backup-mgr-web
-pm2 save
+pm2 start web/ecosystem.config.cjs && pm2 save
 ```
 
 Open `http://<vps-ip>:3001` and sign in with your **Linux** username and password — the same one you
-`ssh` with. **There is no default panel login to change**: there are no panel passwords at all, you
-authenticate against the OS, and every human account on the server (`uid >= 1000`, plus root) is
-already a panel user. A new account appears seconds after `sudo adduser`.
+`ssh` with. There is **no default login and no panel password to change**: accounts and privileges
+come from the OS. Every human account (`uid >= 1000`, plus root) is already a panel user, a new one
+appears seconds after `sudo adduser`, and **any account that may run `sudo` is an administrator**
+(`sudo usermod -aG sudo alice`, effective in seconds).
 
-**`sudo` decides who is an administrator.** An account that may run `sudo` is a panel admin;
-`sudo usermod -aG sudo <user>` is how you promote someone. Privileged panel work — managing users,
-reinstalling the shared binary, touching someone else's instance — runs under *that user's* own
-sudo: silent when their rules are `NOPASSWD`, otherwise one prompt remembering the password for
-15 minutes, exactly like sudo itself. Your own config, backups and daemon never prompt, because they
-are yours. Every elevation and privileged change is written to an audit log on the Logs page.
+Privileged panel work — managing users, reinstalling the binary, touching another user's instance —
+runs under *that user's own* sudo: silent for `NOPASSWD` rules, otherwise one prompt that remembers
+the password for 15 minutes. Your own config, backups and daemon never prompt, because they are
+yours. Every elevation and privileged change is written to the audit log on the Logs page.
 
-To serve it on port 80 / a domain instead of `:3001`, see
-[`deploy/nginx-backup-mgr.conf`](deploy/nginx-backup-mgr.conf). Note that an existing nginx site with
-`listen 80 default_server` wins over a plain `listen 80` block — give this one its own port or a real
-`server_name`. Set `BACKUP_MGR_WEB_HOST=127.0.0.1` to bind the panel to localhost only.
+Two pm2 configs, one per app, each next to the code it starts:
 
-> **pm2 decides by filename:** it parses a file as a config only when the name matches
-> `*.config.{js,cjs,mjs}`. So the panel starts as `ecosystem.frontend.config.cjs`, which re-exports
-> `ecosystem.frontend.cjs`. Starting the latter directly makes pm2 run it as a script and start
-> nothing — it detects that and exits with an explanation.
+| App | Config | Logs |
+| --- | --- | --- |
+| `backup-mgr` (daemon) | `ecosystem.config.cjs` | `logs/` |
+| `backup-mgr-web` (panel) | `web/ecosystem.config.cjs` | `web/logs/` |
 
-## 3. Everyday commands
+#### A domain instead of `:3001`
 
-```bash
-backup-mgr run                     # back up now
-backup-mgr run --dry-run           # show what would happen
-backup-mgr check                   # verify remote archives against the recorded hashes
-backup-mgr restore                 # list backups
-backup-mgr restore <file> [dir]    # restore one (--force to override a hash mismatch)
-backup-mgr status                  # current state, next run, remotes
-backup-mgr history 20              # last 20 runs
-backup-mgr fix-perms               # re-apply access to the source folder
-backup-mgr reset                   # clear a stuck / failed state
-```
-
-`restore` **refuses to proceed when a downloaded archive does not match the recorded hash**. That is
-the point: a corrupt or tampered copy is not silently extracted. `--force` overrides it deliberately.
-
-**After every update of this repo, rebuild and reinstall the binary:**
+[`deploy/nginx-backup-mgr.conf`](deploy/nginx-backup-mgr.conf) is a complete nginx site (HTTPS with
+Let's Encrypt, `http` → `https`, Cloudflare-aware). Set your hostname in both `server_name` lines and
+the two `ssl_certificate` paths, then:
 
 ```bash
-cargo build --release && sudo install -m 0755 target/release/backup-mgr /usr/local/bin/backup-mgr
-pm2 restart backup-mgr
+sudo ln -sfn /opt/drive-backup/deploy/nginx-backup-mgr.conf /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl reload nginx
 ```
 
-The panel drives whichever `backup-mgr` is on `PATH` (or `BACKUP_MGR_BIN`), and an old binary lacks
-the `--json` output it needs. It tells you rather than guessing: the Dashboard shows the installed
-version and commit, turns the badge red when it does not match the checkout, offers a one-click
-**Rebuild & reinstall**, and warns when the daemon is still running a since-replaced binary.
+Reload nginx — creating the symlink alone changes nothing, and until it reloads the hostname is served
+by whichever site block comes first. For a certificate: `sudo certbot --nginx -d your.host`.
 
-## 4. Scheduling
+## Everyday commands
 
-Set one of these in `config.yml`, or use the Dashboard's Schedule card (both modes are there):
+```bash
+backup-mgr run                       # back up now
+backup-mgr run --dry-run             # show what would happen, change nothing
+backup-mgr check                     # verify remote archives against the recorded hashes
+backup-mgr restore                   # list what can be restored
+backup-mgr restore <file> [dir]      # restore (see below)
+backup-mgr status                    # state, next run, remotes
+backup-mgr history 20                # last 20 runs
+backup-mgr fix-perms [--user u]      # re-apply access to the source folder
+backup-mgr reset                     # clear a stuck / failed state
+```
+
+`restore` **empties the target directory first**, then extracts, so the result is exactly that
+backup and nothing else. Extraction is staged inside the target, so a failure or interruption leaves
+the target as it was, and targets that must never be emptied (`/`, the instance directory, the backup
+directory, an ancestor of the source) are refused. Use `--merge` to write over the target and keep
+files that are not in the archive, e.g. when restoring into a live server directory.
+
+`restore` **aborts when an archive does not match the recorded hash** — a corrupt or tampered copy is
+never silently extracted. `--force` overrides that deliberately.
+
+On the panel, restoring from an instance with `encrypt.enabled` asks for the encryption passphrase in
+a dialog and then runs the restore; it is remembered for 15 minutes (`BACKUP_MGR_RESTORE_UNLOCK_MS`),
+and the CLI needs no prompt because it reads the passphrase from the config itself.
+
+## Scheduling
+
+Set one of these in `config.yml`, or use the Schedule card on the panel's Dashboard (both modes):
 
 ```yaml
 backup:
   time: "03:30"            # first run of the day
   backups_per_day: 4       # -> 03:30, 09:30, 15:30, 21:30 (evenly spaced)
 
-  times:                   # or exact times; when set, it IS the schedule
+  times:                   # or exact times; when set, this IS the schedule
     - "03:30"
     - "15:30"
 ```
 
-World-only snapshots (`world_backup.times`) are separate, and are configured on the panel's Config
-page with the rest of the world-backup settings. The daemon reads `config.yml` at startup, so
-`pm2 restart backup-mgr` applies changes.
+The daemon reads `config.yml` at startup, so apply changes with `pm2 restart backup-mgr`.
 
-## 5. Troubleshooting
+## Updating
+
+```bash
+git pull
+cargo build --release && sudo install -m 0755 target/release/backup-mgr /usr/local/bin/backup-mgr
+cd web && npm install && npm run build && cd ..
+pm2 restart backup-mgr backup-mgr-web
+```
+
+The panel drives the `backup-mgr` on `PATH` (or `BACKUP_MGR_BIN`). If it does not match this checkout
+it says so: the Dashboard badge turns red with a one-click **Rebuild & reinstall**, and it warns when
+the running daemon still has the previous binary in memory (restart it to apply).
+
+## Troubleshooting
 
 | Symptom | Fix |
 | --- | --- |
-| `cannot read source … Permission denied` | Run `sudo ./scripts/grant-access.sh "$USER" <dir>` or press **Fix permissions** in the panel. Re-run after resetting permissions. |
+| `cannot read source … Permission denied` | `sudo ./scripts/grant-access.sh "$USER" <dir>`, or **Fix permissions** on the Dashboard. Re-run after resetting permissions. |
 | Config or schedule change does nothing | The daemon reads the file at startup: `pm2 restart backup-mgr`. |
-| Dashboard badge is red / "out of date" | The installed binary is not this checkout. Rebuild and reinstall (see above); the panel prints the exact command. |
-| Panel says the account has no instance | That user has no `config.yml` yet — an admin can create it from the **Users** page. |
-| Backup stops after a failure | By design: `run.continue_after_manual_resume` is `false`. Inspect, then `backup-mgr reset`. |
-| Sign-in says `/etc/shadow` is unreadable | The panel's service account needs passwordless sudo for `ge…`/`env`; see [`deploy/sudoers-backup-mgr`](deploy/sudoers-backup-mgr). |
+| Dashboard badge red / "out of date" | The installed binary is not this checkout. Rebuild and reinstall (see **Updating**); the panel shows the exact command. |
+| Banner asks to restart the daemon | A new binary was installed while it was running. Use **Restart daemon** on the Dashboard. |
+| "A previous backup did not finish cleanly" | A run was interrupted. **Reset state** on the Dashboard (or `backup-mgr reset`); it stops a run in progress first. |
+| Backup stops after a failure | By design: `run.continue_after_manual_resume` is `false`. Inspect, then reset. |
+| Restore refuses the target | The target is a system directory or would take the instance/backups with it. Pick another directory, or `--merge`. |
+| Restore refuses the archive | Its hash does not match the recorded manifest. Restore another archive, or `--force` if you know why. |
+| Panel: "this account cannot sign in" | Only real OS accounts can sign in; a locked/no-password account cannot. |
+| Panel: sign-in says `/etc/shadow` is unreadable | The panel's service account needs the passwordless sudo rules in [`deploy/sudoers-backup-mgr`](deploy/sudoers-backup-mgr). |
+| Panel: "no instance yet" | That user has no `config.yml`. An admin can create it from the **Users** page. |
+| Live logs don't appear through a proxy | It must not buffer: `proxy_buffering off` (already set in the nginx example). |
+| Upload fails with `403`/`insufficientPermissions` | Re-authorize: `backup-mgr remote-auth --config config.yml`. |
 
-## 6. Development
+Logs are per day in `logs/` (`backup_YYYY-MM-DD.log`) and also visible on the panel's Logs page.
+
+## Development
 
 ```bash
-cargo test                    # Rust: scheduler/schedule rules, restore integrity gate  (12 tests)
-cd web && npm test            # Panel: auth, instances, sudo elevation, API routes  (208 tests)
-cd web && npx tsc --noEmit    # Type-check
+cargo test                     # Rust: scheduling, restore integrity and target safety
+cd web && npm test             # panel: auth, instances, sudo elevation, API routes
+cd web && npx tsc --noEmit     # type-check
+cd web && npm run build        # production build
 ```
 
-Layout: `src/` (`main.rs`, `backup.rs`, `config.rs`, `scheduler.rs`, `drive.rs`, `db.rs`,
-`state.rs`, `notify.rs`, `perms.rs`, `ptero.rs`, `metrics.rs`), `web/src/app` (pages + API routes),
-`web/src/lib` (panel logic), `deploy/` (nginx + sudoers), `scripts/grant-access.sh`.
+Layout: `src/` (Rust), `web/src/app` (pages + API routes), `web/src/lib` (panel logic), `deploy/`,
+`scripts/`.

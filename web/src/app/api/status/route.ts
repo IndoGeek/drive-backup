@@ -3,7 +3,8 @@ import { parseTrailingJson, runCli, staleBinaryHint } from '@/lib/cli';
 import { guard } from '@/lib/auth';
 import { binaryPath } from '@/lib/panel';
 import { instanceView, pickInstance, requireProvisioned } from '@/lib/routeutil';
-import { computeStale, type RunLockFacts, type StaleInfo } from '@/lib/stale';
+import { computeStale, lockIsHeldAlive, type RunLockFacts, type StaleInfo } from '@/lib/stale';
+import { currentAction } from '@/lib/action-store';
 
 export const runtime = 'nodejs';
 
@@ -38,6 +39,8 @@ export type StatusPayload = {
   next_run_seconds?: number | null;
   run_lock?: RunLockFacts;
   stale?: StaleInfo | null;
+  running_action?: { id: string; action: string; label: string; started_at: number } | null;
+  lock_held_alive?: boolean;
 };
 
 export async function GET(req: Request) {
@@ -67,5 +70,20 @@ export async function GET(req: Request) {
     );
   }
   const stale = computeStale(parsed.state, parsed.run_lock);
-  return NextResponse.json({ ...parsed, stale, instance: instanceView(inst) });
+  const running = currentAction(inst.root);
+  return NextResponse.json({
+    ...parsed,
+    stale,
+    running_action:
+      running && running.status === 'running'
+        ? {
+            id: running.id,
+            action: running.action,
+            label: running.label,
+            started_at: running.startedAt,
+          }
+        : null,
+    lock_held_alive: lockIsHeldAlive(parsed.run_lock),
+    instance: instanceView(inst),
+  });
 }

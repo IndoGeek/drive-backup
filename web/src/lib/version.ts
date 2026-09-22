@@ -40,6 +40,10 @@ function known(value: string | null | undefined): value is string {
   return !!value && !UNKNOWN.has(value.trim().toLowerCase());
 }
 
+function commitId(value: string): string {
+  return value.trim().replace(/-dirty$/i, '');
+}
+
 export function compareBuild(
   installed: BuildInfo | null,
   expected: ExpectedBuild,
@@ -59,7 +63,11 @@ export function compareBuild(
     );
   }
 
-  if (known(expected.commit) && known(installed.commit) && installed.commit !== expected.commit) {
+  if (
+    known(expected.commit) &&
+    known(installed.commit) &&
+    commitId(installed.commit) !== commitId(expected.commit)
+  ) {
     reasons.push(
       `binary was built from ${installed.commit} but the checkout is at ${expected.commit}.`,
     );

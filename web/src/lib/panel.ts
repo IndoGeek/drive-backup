@@ -91,6 +91,11 @@ export function sudoTimeoutMs(): number {
   return raw !== undefined && raw >= 0 ? raw : 15 * 60_000;
 }
 
+export function restoreUnlockMs(): number {
+  const raw = envNumber('BACKUP_MGR_RESTORE_UNLOCK_MS');
+  return raw !== undefined && raw >= 0 ? raw : 15 * 60_000;
+}
+
 export function sudoGroups(): string[] {
   const raw = process.env.BACKUP_MGR_SUDO_GROUPS;
   const list = (raw ?? 'sudo,admin,wheel')

@@ -14,7 +14,8 @@ use chrono::{DateTime, Timelike, Utc};
 use chrono_tz::Tz;
 use path_guard::LockGuard;
 use std::env;
-use std::path::{Path, PathBuf};
+use std::ffi::OsStr;
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, OnceLock};
 use std::thread;
@@ -27,11 +28,13 @@ use crate::state::RunState;
 
 const LOCK_NAME: &str = ".run.lock";
 
+const RESTORE_STAGE_DIR: &str = ".backup-mgr-restore";
+
 const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
 const BUILD_COMMIT: &str = env!("BUILD_GIT_COMMIT");
 const BUILD_TIMESTAMP: &str = env!("BUILD_TIMESTAMP");
 
-const USAGE: &str = "Usage:\n  backup-mgr [daemon]\n  backup-mgr run [--world] [--no-upload|--keep-local|--no-ptero|--dry-run|--force]\n  backup-mgr test-compress\n  backup-mgr restore [<file> [target-dir]] [--force]\n  backup-mgr restore --json\n  backup-mgr check [file]\n  backup-mgr history [N]\n  backup-mgr remote-auth\n  backup-mgr status [--json]\n  backup-mgr fix-perms [--user <name>]\n  backup-mgr version [--json]\n  backup-mgr reset\n  [--config <path>]";
+const USAGE: &str = "Usage:\n  backup-mgr [daemon]\n  backup-mgr run [--world] [--no-upload|--keep-local|--no-ptero|--dry-run|--force]\n  backup-mgr test-compress\n  backup-mgr restore [<file> [target-dir]] [--force] [--merge]\n  backup-mgr restore --json\n  backup-mgr check [file]\n  backup-mgr history [N]\n  backup-mgr remote-auth\n  backup-mgr status [--json]\n  backup-mgr fix-perms [--user <name>]\n  backup-mgr version [--json]\n  backup-mgr reset\n  [--config <path>]";
 
 fn build_json() -> serde_json::Value {
     serde_json::json!({
@@ -993,12 +996,16 @@ fn cmd_reset(cfg: &Config) -> Result<(), String> {
     Ok(())
 }
 
+fn is_partial_archive(name: &str) -> bool {
+    name.ends_with(".tmp") || name.ends_with(".part")
+}
+
 fn remote_dir_names(cfg: &Config) -> Vec<String> {
     let mut names = Vec::new();
     for r in drive::active_remotes(cfg) {
         if let Ok(files) = drive::list_backups(&r) {
             for f in files {
-                if !f.IsDir {
+                if !f.IsDir && !is_partial_archive(&f.Name) {
                     names.push(format!("{}  (on {})", f.Name, r.label()));
                 }
             }
@@ -1007,8 +1014,9 @@ fn remote_dir_names(cfg: &Config) -> Vec<String> {
     if let Ok(entries) = std::fs::read_dir(cfg.resolve(&cfg.inner.backup.dir)) {
         for e in entries.flatten() {
             let p = e.path();
-            if p.is_file() {
-                names.push(format!("{}  (local {})", p.file_name().unwrap_or_default().to_string_lossy(), cfg.inner.backup.dir));
+            let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+            if p.is_file() && !is_partial_archive(&name) {
+                names.push(format!("{}  (local {})", name, cfg.inner.backup.dir));
             }
         }
     }
@@ -1035,9 +1043,10 @@ fn cmd_restore_list_json(cfg: &Config) -> Result<(), String> {
     if let Ok(entries) = std::fs::read_dir(cfg.resolve(&cfg.inner.backup.dir)) {
         for e in entries.flatten() {
             let p = e.path();
-            if p.is_file() {
+            let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+            if p.is_file() && !is_partial_archive(&name) {
                 items.push(serde_json::json!({
-                    "name": p.file_name().unwrap_or_default().to_string_lossy(),
+                    "name": name,
                     "source": "local",
                     "size": std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0),
                 }));
@@ -1063,6 +1072,7 @@ fn cmd_restore(cfg: &Config, logger: &Logger, args: &[String]) -> Result<(), Str
     }
 
     let force = args.iter().any(|a| a == "--force" || a == "--yes");
+    let merge = args.iter().any(|a| a == "--merge");
     let positional: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
 
     if positional.is_empty() {
@@ -1074,7 +1084,11 @@ fn cmd_restore(cfg: &Config, logger: &Logger, args: &[String]) -> Result<(), Str
         for n in names {
             println!("  {}", n);
         }
-        println!("\nUsage: backup-mgr restore <filename> [target-dir] [--force]");
+        println!(
+            "\nUsage: backup-mgr restore <filename> [target-dir] [--force] [--merge]\n\
+             The target is emptied first so the result is exactly this backup;\n\
+             --merge writes the archive over the target and keeps everything else."
+        );
         return Ok(());
     }
 
@@ -1086,7 +1100,20 @@ fn cmd_restore(cfg: &Config, logger: &Logger, args: &[String]) -> Result<(), Str
         .unwrap_or_else(|| default_target.to_string_lossy().to_string());
     let target = cfg.resolve(&target_str);
 
-    if let Err(e) = cmd_restore_do(cfg, logger, file, &target, force) {
+    if !restore_source_exists(cfg, file) {
+        let reason = format!(
+            "backup '{}' not found on any configured remote or in {} (run `backup-mgr restore` to list)",
+            file, cfg.inner.backup.dir
+        );
+        return Err(reason);
+    }
+    if !merge {
+        if let Some(reason) = restore_target_refusal(cfg, &target) {
+            return Err(reason);
+        }
+    }
+
+    if let Err(e) = cmd_restore_do(cfg, logger, file, &target, force, merge) {
         let size = std::fs::metadata(target.join(file)).map(|m| m.len()).unwrap_or(0);
         notify::send(
             &cfg.inner.notifications.discord_webhook,
@@ -1135,7 +1162,14 @@ fn restore_hash_gate(
     ))
 }
 
-fn cmd_restore_do(cfg: &Config, logger: &Logger, file: &str, target: &Path, force: bool) -> Result<(), String> {
+fn cmd_restore_do(
+    cfg: &Config,
+    logger: &Logger,
+    file: &str,
+    target: &Path,
+    force: bool,
+    merge: bool,
+) -> Result<(), String> {
     let mut chosen: Option<Remote> = None;
     for r in drive::active_remotes(cfg) {
         if let Ok(files) = drive::list_backups(&r) {
@@ -1145,15 +1179,31 @@ fn cmd_restore_do(cfg: &Config, logger: &Logger, file: &str, target: &Path, forc
             }
         }
     }
-    if chosen.is_none() {
-        return Err(format!("backup '{}' not found on any configured remote (run `backup-mgr restore` to list)", file));
-    }
-    let r = chosen.unwrap();
-    std::fs::create_dir_all(target).map_err(|e| e.to_string())?;
 
-    if let Some(d) = db() {
-        if let Some(m) = d.manifest(file) {
-            match drive::remote_md5(&r, file) {
+    let local_archive = cfg.resolve(&cfg.inner.backup.dir).join(file);
+    if chosen.is_none() && !local_archive.is_file() {
+        return Err(format!(
+            "backup '{}' not found on any configured remote or in {} (run `backup-mgr restore` to list)",
+            file, cfg.inner.backup.dir
+        ));
+    }
+
+    std::fs::create_dir_all(target).map_err(|e| e.to_string())?;
+    if !merge {
+        if let Some(reason) = restore_target_refusal(cfg, target) {
+            return Err(reason);
+        }
+        if normalise_path(target) == normalise_path(&cfg.resolve(&cfg.inner.backup.path)) {
+            logger.warn(&format!(
+                "restoring in place: {} is the directory this backup was taken from, and it is emptied before the archive is extracted",
+                target.display()
+            ));
+        }
+    }
+
+    if let Some(r) = &chosen {
+        if let Some(m) = db().and_then(|d| d.manifest(file)) {
+            match drive::remote_md5(r, file) {
                 Ok(remote_hash) => {
                     match restore_hash_gate(file, "remote pre-check", &m.md5, &remote_hash, force) {
                         Ok(true) => logger.info(&format!("integrity pre-check passed for {} (md5 matches manifest)", file)),
@@ -1166,7 +1216,7 @@ fn cmd_restore_do(cfg: &Config, logger: &Logger, file: &str, target: &Path, forc
                 }
                 Err(e) => {
                     logger.warn(&format!(
-                        "could not read remote hash for {} ({e}); will verify the downloaded file instead",
+                        "could not read remote hash for {} ({e}); will verify the local copy instead",
                         file
                     ));
                 }
@@ -1175,28 +1225,44 @@ fn cmd_restore_do(cfg: &Config, logger: &Logger, file: &str, target: &Path, forc
     }
 
     let staging = cfg.resolve(&cfg.inner.backup.dir).join(".restore");
-    std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
-    let raw = staging.join(file);
-    drive::download_file(&r, file, &raw, logger)?;
+
+    let (raw, downloaded) = match &chosen {
+        Some(r) => {
+            std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
+            let raw = staging.join(file);
+            drive::download_file(r, file, &raw, logger)?;
+            (raw, true)
+        }
+        None => {
+            logger.info(&format!(
+                "no remote copy of {} — restoring the local archive {}",
+                file,
+                local_archive.display()
+            ));
+            (local_archive.clone(), false)
+        }
+    };
 
     if let Some(m) = db().and_then(|d| d.manifest(file)) {
         match drive::local_md5(&raw) {
             Ok(local_hash) => {
-                match restore_hash_gate(file, "downloaded file", &m.md5, &local_hash, force) {
-                    Ok(true) => logger.info(&format!("integrity check passed for downloaded {} (md5 matches manifest)", file)),
+                match restore_hash_gate(file, "archive file", &m.md5, &local_hash, force) {
+                    Ok(true) => logger.info(&format!("integrity check passed for {} (md5 matches manifest)", file)),
                     Ok(false) => logger.warn(&format!(
                         "--force specified: extracting {} despite integrity mismatch (local md5 {} != manifest md5 {})",
                         file, local_hash, m.md5
                     )),
                     Err(e) => {
-                        let _ = std::fs::remove_file(&raw);
+                        if downloaded {
+                            let _ = std::fs::remove_file(&raw);
+                        }
                         return Err(e);
                     }
                 }
             }
             Err(e) => {
                 logger.warn(&format!(
-                    "could not verify downloaded {} ({e}); continuing without local hash confirmation",
+                    "could not verify {} ({e}); continuing without a hash confirmation",
                     file
                 ));
             }
@@ -1205,19 +1271,207 @@ fn cmd_restore_do(cfg: &Config, logger: &Logger, file: &str, target: &Path, forc
 
     let mut plain = raw.clone();
     if file.ends_with(".gpg") {
+        std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
         let base = file.trim_end_matches(".gpg");
         plain = staging.join(base);
         backup::decrypt_gpg(&raw, &enc_passphrase(cfg), &plain, logger)?;
     }
 
     let name = plain.file_name().unwrap_or_default().to_string_lossy().to_string();
-    let out = extract_archive(&plain, &name, target, logger)?;
-    let _ = std::fs::remove_file(&raw);
+    if merge {
+        logger.info(&format!(
+            "merging {} into {} (files that are not in this backup are kept)",
+            name,
+            target.display()
+        ));
+        extract_archive(&plain, &name, target, logger)?;
+    } else {
+        clean_restore_into(&plain, &name, target, logger)?;
+    }
+
+    if downloaded {
+        let _ = std::fs::remove_file(&raw);
+    }
     if plain != raw {
         let _ = std::fs::remove_file(&plain);
     }
-    logger.info(&format!("extracted {} -> {}", name, target.display()));
-    let _ = out;
+    prune_restore_staging(&staging);
+    logger.info(&format!("restored {} -> {}", name, target.display()));
+    Ok(())
+}
+
+fn prune_restore_staging(dir: &Path) {
+    let empty = std::fs::read_dir(dir).map(|mut e| e.next().is_none()).unwrap_or(false);
+    if empty {
+        let _ = std::fs::remove_dir(dir);
+    }
+}
+
+fn restore_source_exists(cfg: &Config, file: &str) -> bool {
+    for r in drive::active_remotes(cfg) {
+        if let Ok(files) = drive::list_backups(&r) {
+            if files.iter().any(|f| f.Name == file) {
+                return true;
+            }
+        }
+    }
+    cfg.resolve(&cfg.inner.backup.dir).join(file).is_file()
+}
+
+fn normalise_path(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+fn restore_target_refusal(cfg: &Config, target: &Path) -> Option<String> {
+    restore_target_refusal_for(
+        target,
+        &cfg.base_dir,
+        &cfg.resolve(&cfg.inner.backup.dir),
+        &cfg.resolve(&cfg.inner.backup.path),
+    )
+}
+
+fn restore_target_refusal_for(
+    target: &Path,
+    instance_root: &Path,
+    backup_dir: &Path,
+    source_dir: &Path,
+) -> Option<String> {
+    let t = normalise_path(target);
+    if !t.is_absolute() {
+        return Some(format!(
+            "refusing to empty {}: the target must be an absolute path",
+            t.display()
+        ));
+    }
+
+    const SYSTEM_DIRS: &[&str] = &[
+        "/", "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib32", "/lib64",
+        "/libx32", "/media", "/mnt", "/opt", "/proc", "/root", "/run", "/sbin", "/srv",
+        "/sys", "/tmp", "/usr", "/var",
+    ];
+    for dir in SYSTEM_DIRS {
+        if t == Path::new(dir) {
+            return Some(format!(
+                "refusing to empty {}: that is a system directory. Pass --merge to add this backup's files without deleting anything, or choose another target.",
+                t.display()
+            ));
+        }
+    }
+
+    let instance_root = normalise_path(instance_root);
+    let backup_dir = normalise_path(backup_dir);
+    let source_dir = normalise_path(source_dir);
+
+    for (label, p) in [
+        ("the instance directory", &instance_root),
+        ("the backup directory", &backup_dir),
+    ] {
+        if t == *p {
+            return Some(format!(
+                "refusing to empty {}: it is {} (config, state, history and archives live there).",
+                t.display(),
+                label
+            ));
+        }
+        if p.starts_with(&t) {
+            return Some(format!(
+                "refusing to empty {}: {} is inside it, so its contents would go too.",
+                t.display(),
+                p.display()
+            ));
+        }
+    }
+
+    if source_dir != t && source_dir.starts_with(&t) {
+        return Some(format!(
+            "refusing to empty {}: the directory this backup was taken from ({}) is inside it.",
+            t.display(),
+            source_dir.display()
+        ));
+    }
+
+    if let Ok(md) = std::fs::symlink_metadata(&t) {
+        if md.file_type().is_symlink() {
+            return Some(format!(
+                "refusing to empty {}: it is a symlink — point the target at the real directory.",
+                t.display()
+            ));
+        }
+    }
+
+    None
+}
+
+fn clean_restore_into(
+    archive: &Path,
+    name: &str,
+    target: &Path,
+    logger: &Logger,
+) -> Result<(), String> {
+    let stage = target.join(RESTORE_STAGE_DIR);
+    if stage.exists() {
+        std::fs::remove_dir_all(&stage)
+            .map_err(|e| format!("cannot clear the leftover staging directory {}: {e}", stage.display()))?;
+    }
+    std::fs::create_dir_all(&stage).map_err(|e| format!("cannot create {}: {e}", stage.display()))?;
+
+    logger.info(&format!(
+        "extracting {} (staged inside {} — it is emptied only once the archive has extracted)",
+        name,
+        target.display()
+    ));
+    if let Err(e) = extract_archive(archive, name, &stage, logger) {
+        let _ = std::fs::remove_dir_all(&stage);
+        return Err(e);
+    }
+
+    let mut removed = 0usize;
+    for entry in std::fs::read_dir(target).map_err(|e| format!("cannot list {}: {e}", target.display()))? {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        if path.file_name() == Some(OsStr::new(RESTORE_STAGE_DIR)) {
+            continue;
+        }
+        let md = std::fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+        let res = if md.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        res.map_err(|e| format!("cannot remove {}: {e}", path.display()))?;
+        removed += 1;
+    }
+    logger.info(&format!(
+        "emptied {} first: removed {} existing entr{}",
+        target.display(),
+        removed,
+        if removed == 1 { "y" } else { "ies" }
+    ));
+
+    let mut moved = 0usize;
+    for entry in std::fs::read_dir(&stage).map_err(|e| format!("cannot list {}: {e}", stage.display()))? {
+        let from = entry.map_err(|e| e.to_string())?.path();
+        let to = target.join(from.file_name().unwrap_or_default());
+        std::fs::rename(&from, &to).map_err(|e| format!("cannot move {} into place: {e}", to.display()))?;
+        moved += 1;
+    }
+    std::fs::remove_dir(&stage).map_err(|e| format!("cannot remove {}: {e}", stage.display()))?;
+    logger.info(&format!(
+        "placed {} entr{} into {}",
+        moved,
+        if moved == 1 { "y" } else { "ies" },
+        target.display()
+    ));
     Ok(())
 }
 
@@ -1556,7 +1810,37 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{restore_hash_gate, schedule_for};
+    use super::{
+        clean_restore_into, is_partial_archive, normalise_path, restore_hash_gate,
+        restore_target_refusal_for, schedule_for, RESTORE_STAGE_DIR,
+    };
+    use crate::logger::Logger;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    fn scratch(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "bm-restore-{}-{}-{label}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn make_archive(src: &Path, archive: &Path) {
+        let ok = Command::new("tar")
+            .current_dir(src)
+            .args(["-czf", archive.to_str().unwrap(), "."])
+            .status()
+            .expect("tar must be installed for these tests");
+        assert!(ok.success());
+    }
+
 
     #[test]
     fn schedule_without_times_keeps_the_even_spacing_rule() {
@@ -1606,9 +1890,116 @@ mod tests {
     }
 
     #[test]
+    fn clean_restore_replaces_the_target_instead_of_merging_into_it() {
+        let root = scratch("clean");
+        let src = root.join("src");
+        let target = root.join("target");
+        std::fs::create_dir_all(src.join("sub")).unwrap();
+        std::fs::write(src.join("file.txt"), "from backup").unwrap();
+        std::fs::write(src.join("sub/keep.txt"), "nested").unwrap();
+        std::fs::create_dir_all(target.join("stale-dir")).unwrap();
+        std::fs::write(target.join("file.txt"), "stale copy").unwrap();
+        std::fs::write(target.join("leftover.txt"), "not in the backup").unwrap();
+        std::fs::write(target.join("stale-dir/x.txt"), "old").unwrap();
+        let archive = root.join("b.tar.gz");
+        make_archive(&src, &archive);
+
+        let logger = Logger::new(root.to_str().unwrap(), "info", 1).unwrap();
+        clean_restore_into(&archive, "b.tar.gz", &target, &logger).unwrap();
+
+        assert_eq!(std::fs::read_to_string(target.join("file.txt")).unwrap(), "from backup");
+        assert_eq!(std::fs::read_to_string(target.join("sub/keep.txt")).unwrap(), "nested");
+        assert!(!target.join("leftover.txt").exists(), "leftover file must be gone");
+        assert!(!target.join("stale-dir").exists(), "leftover directory must be gone");
+        assert!(!target.join(RESTORE_STAGE_DIR).exists(), "staging dir must be cleaned up");
+        let names: Vec<String> = std::fs::read_dir(&target)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names.len(), 2, "target should hold exactly the archive's entries: {names:?}");
+    }
+
+    #[test]
+    fn a_failed_extraction_leaves_the_target_untouched() {
+        let root = scratch("failed");
+        let target = root.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("important.txt"), "keep me").unwrap();
+        let broken = root.join("broken.tar.gz");
+        std::fs::write(&broken, b"this is not a tar archive").unwrap();
+
+        let logger = Logger::new(root.to_str().unwrap(), "info", 1).unwrap();
+        let err = clean_restore_into(&broken, "broken.tar.gz", &target, &logger);
+        assert!(err.is_err());
+        assert_eq!(std::fs::read_to_string(target.join("important.txt")).unwrap(), "keep me");
+        assert!(!target.join(RESTORE_STAGE_DIR).exists());
+    }
+
+    #[test]
+    fn a_clean_restore_empty_directory_is_fine() {
+        let root = scratch("empty");
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("only.txt"), "content").unwrap();
+        let archive = root.join("b.tar.gz");
+        make_archive(&src, &archive);
+
+        let logger = Logger::new(root.to_str().unwrap(), "info", 1).unwrap();
+        let fresh = root.join("fresh/deeper");
+        std::fs::create_dir_all(&fresh).unwrap();
+        clean_restore_into(&archive, "b.tar.gz", &fresh, &logger).unwrap();
+        assert_eq!(std::fs::read_to_string(fresh.join("only.txt")).unwrap(), "content");
+    }
+
+    #[test]
+    fn restore_refuses_targets_that_must_never_be_emptied() {
+        let root = Path::new("/opt/drive-backup");
+        let backup = Path::new("/opt/drive-backup/backup");
+        let source = Path::new("/var/lib/pterodactyl/volumes/abc");
+        let refuse = |t: &str| restore_target_refusal_for(Path::new(t), root, backup, source);
+
+        for bad in ["/", "/etc", "/home", "/usr", "/var", "/opt"] {
+            assert!(refuse(bad).is_some(), "{bad} must be refused");
+        }
+        assert!(refuse("/opt/drive-backup").is_some(), "the instance root must be refused");
+        assert!(refuse("/opt/drive-backup/backup").is_some(), "the backup dir must be refused");
+        assert!(refuse("/opt").is_some(), "an ancestor of the instance root must be refused");
+        assert!(refuse("/var/lib/pterodactyl").is_some(), "an ancestor of the source must be refused");
+        assert!(refuse("/opt/drive-backup/backup/restore").is_none(), "the sandbox target is allowed");
+        assert!(refuse("/srv/restore/kept").is_none(), "a normal directory is allowed");
+        assert!(refuse("/var/lib/pterodactyl/volumes/abc").is_none(), "restoring in place is allowed");
+        assert!(refuse("relative/dir").is_some(), "a relative path must be refused");
+    }
+
+    #[test]
+    fn a_symlinked_target_is_refused() {
+        let root = scratch("symlink");
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let refused = restore_target_refusal_for(&link, &root.join("inst"), &root.join("inst/backup"), &root.join("src"));
+        assert!(refused.is_some());
+    }
+
+    #[test]
+    fn half_written_archives_are_not_offered_as_restore_sources() {
+        assert!(is_partial_archive("bund.tar.gz.tmp"));
+        assert!(is_partial_archive("bund.tar.gz.part"));
+        assert!(!is_partial_archive("bund_22-09-26_09-58.tar.gz"));
+    }
+
+    #[test]
+    fn paths_are_normalised_before_comparison() {
+        assert_eq!(normalise_path(Path::new("/a/b/../c/./d")), PathBuf::from("/a/c/d"));
+        assert_eq!(normalise_path(Path::new("/a/../../b")), PathBuf::from("/b"));
+    }
+
+    #[test]
     fn restore_gate_force_overrides_mismatch() {
         assert_eq!(
-            restore_hash_gate("b.tar.gz", "downloaded file", "abc", "def", true),
+            restore_hash_gate("b.tar.gz", "archive file", "abc", "def", true),
             Ok(false)
         );
     }

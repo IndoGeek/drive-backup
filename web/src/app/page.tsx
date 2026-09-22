@@ -108,7 +108,25 @@ type Status = {
     pid_alive: boolean | null;
   };
   stale?: { message: string; items: string[] } | null;
+  running_action?: { id: string; action: string; label: string; started_at: number } | null;
+  lock_held_alive?: boolean;
 };
+
+const ACTION_LABELS: Record<string, string> = {
+  run: 'Run',
+  'dry-run': 'Dry run',
+  check: 'Integrity check',
+  'test-compress': 'Test compression',
+  'restore-list': 'List backups',
+  restore: 'Restore',
+  'fix-perms': 'Fix permissions',
+  reset: 'Reset state',
+};
+
+function actionLabel(name: string | null | undefined): string {
+  if (!name) return '';
+  return ACTION_LABELS[name] ?? name;
+}
 
 type BinaryInfo = {
   binary: string;
@@ -195,6 +213,8 @@ export default function DashboardPage() {
 
   const [output, setOutput] = useState('');
   const [running, setRunning] = useState(false);
+  const [resultLabel, setResultLabel] = useState('');
+  const [resetError, setResetError] = useState<string | null>(null);
   const [lastResult, setLastResult] = useState<{ ok: boolean; code: number | null } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const attachRef = useRef<AbortController | null>(null);
@@ -209,6 +229,9 @@ export default function DashboardPage() {
   const [scheduleError, setScheduleError] = useState<string | null>(null);
 
   const state = status?.state;
+  const serverAction = status?.running_action ?? null;
+  const actionInFlight = running || serverAction !== null;
+  const inFlightLabel = serverAction?.label || actionLabel(serverAction?.action) || resultLabel;
   const failed = Boolean(state?.requires_manual_resume) || state?.status === 'failed';
   const inFlight = state?.status === 'running';
   const progress = state?.progress ?? null;
@@ -336,12 +359,17 @@ export default function DashboardPage() {
     options: Record<string, unknown> = {},
     label?: string,
   ) {
+    const name = label ?? ACTION_LABELS[action] ?? action;
     setBusy(label ?? action);
     setRunning(true);
     setLastResult(null);
+    setResultLabel(name);
+    setResetError(null);
     setOutput('');
     const controller = new AbortController();
     abortRef.current = controller;
+
+    let attached = false;
 
     try {
       const res = await fetch('/api/actions/stream', {
@@ -353,6 +381,15 @@ export default function DashboardPage() {
 
       if (!res.ok || !res.body) {
         const data = (await res.json().catch(() => ({}))) as { error?: string };
+
+        if (res.status === 409) {
+          append(
+            `! ${data.error ?? 'an action is already running'}\n[attaching to the run in progress]\n`,
+          );
+          attached = true;
+          await attachConsole();
+          return;
+        }
         append(`! ${data.error ?? `HTTP ${res.status}`}\n`);
         setLastResult({ ok: false, code: null });
         return;
@@ -403,8 +440,10 @@ export default function DashboardPage() {
       }
       setLastResult((prev) => prev ?? { ok: false, code: null });
     } finally {
-      setRunning(false);
-      setBusy(null);
+      if (!attached) {
+        setRunning(false);
+        setBusy(null);
+      }
       abortRef.current = null;
       await loadStatus();
       await loadRuns();
@@ -434,6 +473,7 @@ export default function DashboardPage() {
             type?: string;
             id?: string;
             action?: string;
+            label?: string;
             output?: string;
             status?: string;
             exit_code?: number | null;
@@ -451,6 +491,7 @@ export default function DashboardPage() {
           if (msg.type === 'idle') return;
           if (msg.type === 'snapshot') {
             setOutput(msg.output ?? '');
+            setResultLabel(msg.label || actionLabel(msg.action) || 'Action');
             const wasRunning = msg.status === 'running';
             setRunning(wasRunning);
             setBusy(wasRunning ? msg.action ?? 'running' : null);
@@ -480,10 +521,29 @@ export default function DashboardPage() {
     }
   }
 
-  async function resetStale() {
-    if (!stale || resettingStale) return;
-    setResettingStale(true);
+  async function stopAnyAction(): Promise<void> {
+    if (!actionInFlight) return;
+    append('\n! stopping the run in progress so the state can be reset\n');
     try {
+      await fetch('/api/actions/stop', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+    } catch {
+    }
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setRunning(false);
+    setBusy(null);
+  }
+
+  async function resetState(): Promise<void> {
+    if (resettingStale) return;
+    setResettingStale(true);
+    setResetError(null);
+    try {
+      await stopAnyAction();
       const res = await fetch('/api/actions/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -491,16 +551,14 @@ export default function DashboardPage() {
       });
       if (!res.ok || !res.body) {
         const data = (await res.json().catch(() => ({}))) as { error?: string };
-        setStale({
-          message: `Reset could not be started: ${data.error ?? `HTTP ${res.status}`}`,
-          items: [],
-        });
+        setResetError(data.error ?? `HTTP ${res.status}`);
         return;
       }
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
       let ok = false;
+      let tail = '';
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -511,25 +569,31 @@ export default function DashboardPage() {
           buffer = buffer.slice(nl + 1);
           nl = buffer.indexOf('\n');
           if (!line) continue;
-          let msg: { type?: string; ok?: boolean };
+          let msg: { type?: string; ok?: boolean; data?: string; code?: number | null };
           try {
             msg = JSON.parse(line) as typeof msg;
           } catch {
             continue;
           }
+          if (msg.type === 'stdout' || msg.type === 'stderr') tail = `${tail}${msg.data ?? ''}`;
           if (msg.type === 'exit') ok = msg.ok === true;
         }
       }
+      append(`\n${tail.trim()}\n`);
       if (ok) {
         setStale(null);
         setStaleDismissed(null);
+        setLastResult(null);
+        append('[state reset — runs can continue]\n');
       } else {
-        setStale({ message: 'Reset did not complete cleanly. Try again.', items: [] });
+        setResetError('the reset command did not finish cleanly — see the terminal');
       }
-    } catch {
-      setStale({ message: 'Reset could not be started (network error).', items: [] });
+    } catch (e) {
+      setResetError(e instanceof Error ? e.message : 'network error');
     } finally {
       setResettingStale(false);
+      await loadStatus();
+      await loadRuns();
     }
   }
 
@@ -613,6 +677,7 @@ export default function DashboardPage() {
       }
     } finally {
       setBusy(null);
+      await loadStatus();
     }
   }
 
@@ -698,12 +763,18 @@ export default function DashboardPage() {
   return (
     <div className="space-y-6">
       {stale && staleDismissed !== stale.message && (
-        <div className="fixed bottom-4 right-4 z-50 w-[min(92vw,560px)]" role="alert">
-          <div className="rounded-lg border border-destructive/50 bg-destructive/10 p-4 shadow-lg">
-            <div className="flex items-start gap-3">
-              <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-destructive" />
-              <div className="min-w-0 flex-1 space-y-1">
-                <p className="text-sm font-semibold text-destructive">{stale.message}</p>
+        <div
+          className="fixed inset-x-3 bottom-3 z-50 sm:inset-x-auto sm:right-4 sm:bottom-4 sm:w-[min(92vw,560px)]"
+          role="alert"
+          aria-live="assertive"
+        >
+          <div className="overflow-hidden rounded-xl border border-destructive/60 bg-card text-card-foreground shadow-2xl">
+            <div className="flex items-start gap-3 p-4">
+              <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-destructive/15">
+                <AlertTriangle className="h-4 w-4 text-destructive" />
+              </span>
+              <div className="min-w-0 flex-1 space-y-2">
+                <p className="text-sm font-semibold">{stale.message}</p>
                 {stale.items.length > 0 && (
                   <ul className="list-disc space-y-0.5 pl-4 text-xs text-muted-foreground">
                     {stale.items.map((it) => (
@@ -711,11 +782,16 @@ export default function DashboardPage() {
                     ))}
                   </ul>
                 )}
+                {resetError && (
+                  <p className="rounded-md bg-destructive/10 px-2 py-1 text-xs text-destructive">
+                    Reset failed: {resetError}
+                  </p>
+                )}
                 <div className="flex flex-wrap items-center gap-2 pt-1">
                   <Button
                     size="sm"
                     variant="destructive"
-                    onClick={() => void resetStale()}
+                    onClick={() => void resetState()}
                     disabled={resettingStale || !can('backup.run')}
                   >
                     {resettingStale ? (
@@ -723,14 +799,15 @@ export default function DashboardPage() {
                     ) : (
                       <RotateCcw className="h-4 w-4" />
                     )}
-                    Reset state
+                    {actionInFlight ? 'Stop run & reset' : 'Reset state'}
                   </Button>
                   <Button
                     size="sm"
                     variant="ghost"
+                    className="text-muted-foreground hover:text-foreground"
                     onClick={() => {
                       setStaleDismissed(stale.message);
-                      setStale(null);
+                      setResetError(null);
                     }}
                   >
                     <X className="h-4 w-4" /> Dismiss
@@ -1057,8 +1134,9 @@ export default function DashboardPage() {
             </Button>
             <Button
               variant="outline"
-              onClick={() => void streamAction('reset')}
-              disabled={busy !== null || !can('backup.run')}
+              onClick={() => void resetState()}
+              disabled={running || resettingStale || !can('backup.run')}
+              title="Clear a failed or interrupted run state so backups can run again"
             >
               Reset state
             </Button>
@@ -1066,21 +1144,27 @@ export default function DashboardPage() {
 
           <div className="space-y-2">
             <div className="flex flex-wrap items-center gap-2">
-              {running && (
+              {actionInFlight && (
                 <>
                   <Loader2 className="h-4 w-4 animate-spin text-primary" />
-                  <span className="text-sm text-muted-foreground">Running…</span>
+                  <span className="text-sm text-muted-foreground">
+                    Running…{inFlightLabel ? ` (${inFlightLabel})` : ''}
+                  </span>
                   <Button size="sm" variant="outline" onClick={stopRun}>
                     <Square className="h-3.5 w-3.5" /> Stop
                   </Button>
                 </>
               )}
-              {!running && lastResult && (
+              {!actionInFlight && lastResult && (
                 <Badge variant={lastResult.ok ? 'success' : 'destructive'}>
+                  {resultLabel ? `${resultLabel}: ` : ''}
                   {lastResult.ok
                     ? 'SUCCESSFUL'
                     : `UNSUCCESSFUL${lastResult.code !== null ? ` (exit ${lastResult.code})` : ''}`}
                 </Badge>
+              )}
+              {!actionInFlight && !lastResult && resetError && (
+                <Badge variant="destructive">RESET FAILED: {resetError}</Badge>
               )}
             </div>
             <pre
@@ -1089,9 +1173,10 @@ export default function DashboardPage() {
               aria-live="polite"
             >
               {output || 'Action output will appear here as it runs…'}
-              {!running && lastResult && (
+              {!actionInFlight && lastResult && (
                 <>
                   {'\n\n'}
+                  {resultLabel ? `${resultLabel}: ` : ''}
                   {lastResult.ok
                     ? 'SUCCESSFUL'
                     : `UNSUCCESSFUL${lastResult.code !== null ? ` (exit ${lastResult.code})` : ''}`}

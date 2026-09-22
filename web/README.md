@@ -22,17 +22,20 @@ On a fresh server, give the panel the privileges it needs once (see [Multiple us
 sudo install -m 0440 ../deploy/sudoers-backup-mgr /etc/sudoers.d/backup-mgr && sudo visudo -c
 ```
 
-Or as a service — run this from the **repo root**, not `web/`:
+Or as a service, from the **repo root**:
 
 ```bash
-pm2 start ecosystem.frontend.config.cjs && pm2 save   # app name: backup-mgr-web
+pm2 start web/ecosystem.config.cjs && pm2 save   # app name: backup-mgr-web
 ```
 
+[`web/ecosystem.config.cjs`](ecosystem.config.cjs) holds every setting the panel needs — port, host,
+log paths and the `BACKUP_MGR_*` passthrough — and nothing outside `web/` is required to start it.
+The daemon has its own file in the repo root ([`../ecosystem.config.cjs`](../ecosystem.config.cjs)).
+
 > pm2 only parses a file as an ecosystem *config* when its **filename** matches
-> `*.config.{js,cjs,mjs}` (or `ecosystem.{js,cjs}`). `ecosystem.frontend.config.cjs` is that file; it
-> re-exports [`../ecosystem.frontend.cjs`](../ecosystem.frontend.cjs), which holds the settings.
-> Running `pm2 start ecosystem.frontend.cjs` would make pm2 execute it as a *script* and start
-> nothing — it now exits with an explanatory error if that happens.
+> `*.config.{js,cjs,mjs}` (or `ecosystem.{js,cjs}`) — hence `ecosystem.config.cjs` for both apps.
+> Running one as a script by mistake makes it exit with an explanatory error rather than start
+> nothing.
 
 The panel binds `0.0.0.0:3001` by default; set `BACKUP_MGR_WEB_HOST=127.0.0.1` to serve it only to
 nginx.
@@ -47,7 +50,7 @@ is an administrator, and root always is. There is no default login and no admin 
 
 | Page | Purpose |
 |---|---|
-| **Dashboard** (`/`) | Status cards, a **countdown to the next scheduled run**, manual backup / dry run / test compression / integrity check, **fix permissions**, reset state, a guided **Restore dialog** (pick a backup → verify → restore, with an optional `--force`), **daemon control** (start / stop / restart the pm2 service), the **schedule** (evenly spaced, or a list of exact times — see [Scheduling](#scheduling)), paged run history, a **binary build badge** with a one-click **Rebuild & reinstall** button (see [Binary version](#binary-version)), and a banner when the daemon is still running a since-replaced binary. Action output **streams live** and ends with `SUCCESSFUL` / `UNSUCCESSFUL (exit N)`. |
+| **Dashboard** (`/`) | Status cards, a **countdown to the next scheduled run**, manual backup / dry run / test compression / integrity check, **fix permissions**, reset state (it stops a run in progress first), a guided **Restore dialog** (pick a backup → verify → restore, with an optional `--force`; when the instance has `encrypt.enabled` the restore asks for the encryption passphrase in a dialog first — see [Restore and the passphrase gate](#restore-and-the-passphrase-gate)), **daemon control** (start / stop / restart the pm2 service), the **schedule** (evenly spaced, or a list of exact times — see [Scheduling](#scheduling)), paged run history, a **binary build badge** with a one-click **Rebuild & reinstall** button (see [Binary version](#binary-version)), and a banner when the daemon is still running a since-replaced binary. Action output **streams live** and ends with `SUCCESSFUL` / `UNSUCCESSFUL (exit N)`. |
 | **Config** (`/config`) | Every *non-schedule* `config.yml` value, grouped by section. Edits preserve comments and are written atomically with `0600` permissions. |
 | **Auth** (`/auth`) | Authorize the **primary** remote or the **secondary** (redundancy) remote. Drive remotes support **both** rclone methods — plain browser auth (just your Google account) or your own client ID/secret; non-Drive remotes (e.g. **Backblaze B2**) are configured with account + key. On a headless VPS use the **paste token** method. Drive tokens are written to `google_drive` / `storage.secondary` in `config.yml`; B2 credentials are stored by rclone itself. |
 | **Logs** (`/logs`) | **One tab per kind of log**, each with its own file list, **live tail** (Server-Sent Events) and download: **Backup** (per-day run logs from `logging.dir`), **Daemon (pm2)** (`logs/pm2.log`, `logs/pm2-error.log`) and **Panel (pm2)** (`web/logs/pm2-web*.log`). The newest file in a tab is selected automatically, and error logs are badged. |
@@ -201,6 +204,29 @@ added in the same change, so an older build ignores `backup.times` and keeps usi
 **World-backup times live on the Config page**, next to the rest of the world-backup settings, because
 they are a property of that feature rather than a second schedule. Nothing appears on two pages.
 
+## Restore and the passphrase gate
+
+The **Restore dialog** on the Dashboard lists what can be restored, verifies the archive against the
+recorded hash, and then restores it: the target is **emptied first** and refilled from the archive, so
+the result is exactly that backup. Run staging happens inside the target, so an interrupted or failed
+restore leaves it untouched, and targets that must never be emptied (a system directory, the instance
+directory, the backup directory) are refused. **Merge** writes over the target and keeps everything
+else — for restoring into a live directory.
+
+When the instance has `encrypt.enabled`, an archive is encrypted and the daemon needs the passphrase
+to read it. The panel asks for it in a dialog (the same way it asks for a sudo password), checks it
+against that instance's `config.yml`, and only then starts the restore:
+
+- the passphrase is **never** stored — the panel keeps a grant in memory for that login for
+  `BACKUP_MGR_RESTORE_UNLOCK_MS` (default 15 minutes), then asks again;
+- until it is confirmed the restore is refused with `428 passphrase_required`, so a missing prompt
+  cannot silently start an encrypted restore;
+- repeated wrong entries are throttled, and every confirmation, refusal and drop is written to the
+  audit log;
+- signing out ends the grant, exactly like the sudo elevation does.
+
+The CLI needs no prompt: it reads the passphrase from the config file it was told to use.
+
 ## Binary version
 
 The panel drives whichever `backup-mgr` it finds, so it reports what it is actually talking to.
@@ -225,7 +251,9 @@ never creates one.
 
 The Dashboard renders this as a badge next to the title (red + an actionable banner when `stale`). A
 field is only compared when **both** sides are known, so a binary built from a tarball (commit
-`unknown`) isn't falsely reported as stale.
+`unknown`) isn't falsely reported as stale. The `-dirty` marker is also ignored: it only records
+whether the tree had uncommitted edits when the binary was built, which a cached build script reports
+differently from the live checkout, so `c0c0961` and `c0c0961-dirty` compare equal.
 
 Beyond the cosmetic warning this prevents a real side effect: an old binary parses `restore --json` as
 *"restore the file named `--json`"*, which logs a failed run and fires a Discord notification. Both
@@ -275,6 +303,7 @@ daemon runs the installed copy) are **not** flagged, so there are no false alarm
 | Variable | Meaning |
 |---|---|
 | `BACKUP_MGR_SUDO_TIMEOUT_MS` | How long an elevated session lasts before the sudo password is asked again (default `900000`, 15 min; `0` asks every time). |
+| `BACKUP_MGR_RESTORE_UNLOCK_MS` | How long a confirmed encryption passphrase is remembered before a restore asks for it again (default `900000`, 15 min). |
 | `BACKUP_MGR_SUDO_GROUPS` | Groups treated as "has sudo" when sudo itself cannot be queried (default `sudo,admin,wheel`). |
 | `BACKUP_MGR_SUDO_FIXTURE` | JSON of canned capability answers instead of asking sudo, e.g. `{"alice":{"has_sudo":true,"passwordless":false}}`. Used by the tests. |
 | `BACKUP_MGR_ADMIN_USER` | Escape hatch for a host where sudo cannot be queried: always treat this account as an admin (it does **not** create a sudo grant for anyone). |
@@ -295,7 +324,7 @@ daemon runs the installed copy) are **not** flagged, so there are no false alarm
 | `BACKUP_MGR_USERS_DB` | Explicit path to the panel's user database. |
 | `PM2_BIN` | `pm2` executable (default: on `PATH`); each instance gets its own daemon via `PM2_HOME`. |
 | `CARGO_BIN` | `cargo` executable used by the one-click **Rebuild & reinstall** button (default: `~/.cargo/bin/cargo`, then `PATH`). |
-| `BACKUP_MGR_WEB_PORT` | Port the panel binds (default `3001`). Read by `ecosystem.frontend.cjs`. |
+| `BACKUP_MGR_WEB_PORT` | Port the panel binds (default `3001`). Read by `web/ecosystem.config.cjs`. |
 | `BACKUP_MGR_WEB_HOST` | Bind address (default `0.0.0.0`). Set `127.0.0.1` to expose the panel only through nginx. |
 | `BACKUP_MGR_MAX_LOGIN_FAILURES` / `BACKUP_MGR_MIN_VERIFY_MS` | Sign-in throttling: failures before a lockout (default `5`) and the reply-time floor (default `350` ms). |
 | `BACKUP_MGR_PASSWD_FILE` / `BACKUP_MGR_SHADOW_FILE` | Alternate account/password database. Normally unset — the tests use them to drive the real code paths without root. |
@@ -320,10 +349,39 @@ If `pm2` isn't installed the Daemon card says so instead of failing.
   not to the host or shell user. But if `google_drive.client_id`/`client_secret` (or the secondary's)
   are set, a token minted with rclone's built-in client will authorize successfully and then fail to
   refresh about an hour later. The Auth page reads your config and shows the exact command.
-- Saving an OAuth token writes it to `config.yml`; the next backup run syncs it into `rclone.conf`
-  automatically.
+- **The "A previous backup did not finish cleanly" banner means the state really is stuck**, not that
+  an action is running: a run lock whose holder is still alive is never reported as stale, so dry runs,
+  `check` and CLI runs (which never mark the state as running) no longer trigger it. It fires for a
+  lock left behind by a killed run or for `requires_manual_resume`. Its **Reset state** button stops any
+  run in progress first, then runs `backup-mgr reset`; the reason is shown in the banner if it fails.
+- `fix-perms` is always called with `--user <instance user>` so it never has to guess the account from
+  the environment.
 - For the live log stream through nginx you need `proxy_buffering off` — already set in
   [`../deploy/nginx-backup-mgr.conf`](../deploy/nginx-backup-mgr.conf).
+
+## Serving the panel on a domain (nginx)
+
+[`../deploy/nginx-backup-mgr.conf`](../deploy/nginx-backup-mgr.conf) is a complete site: HTTPS with
+Let's Encrypt, an `http` → `https` redirect, and streaming-friendly proxy settings. Symlink it in
+place — no need to copy it into `sites-available`:
+
+```bash
+sudo ln -sfn /opt/drive-backup/deploy/nginx-backup-mgr.conf /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+Set your own hostname in **both** `server_name` lines and the two `ssl_certificate` paths, then
+`sudo certbot --nginx -d your.host` picks up the existing block instead of creating another one.
+
+> **Reload, don't just create the symlink.** Until nginx reloads, HTTPS requests for your hostname
+> fall to whichever server block is first in `sites-enabled` (alphabetically — often another site),
+> so the domain serves the *wrong application* and the *wrong certificate*.
+
+If the domain sits behind **Cloudflare** (proxied / orange cloud), the config already handles it:
+the Cloudflare ranges are trusted for `CF-Connecting-IP`, so the audit log, sign-in throttle and sudo
+throttle record the visitor rather than a Cloudflare edge IP, and a direct connection cannot forge
+that header. Cloudflare does **not** buffer the panel's SSE stream — verified frame-for-frame against a
+direct connection — so the Logs live tail and the streamed action output work through it.
 
 ## Log sources
 

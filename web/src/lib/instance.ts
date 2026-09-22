@@ -81,6 +81,8 @@ type ChildEnv = Record<string, string>;
 function childEnv(inst: Instance): ChildEnv {
   return {
     HOME: inst.home,
+    USER: inst.osUser,
+    LOGNAME: inst.osUser,
     PATH: childPath(),
 
     PM2_HOME: inst.pm2Home,

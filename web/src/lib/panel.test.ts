@@ -91,7 +91,7 @@ describe('the pm2 ecosystem file', () => {
     setEnv('BACKUP_MGR_SUDO_TIMEOUT_MS', '');
     setEnv('BACKUP_MGR_ADMIN_USER', '');
 
-    const file = path.join(__dirname, '..', '..', '..', 'ecosystem.frontend.cjs');
+    const file = path.join(__dirname, '..', '..', 'ecosystem.config.cjs');
 
     const cfg = require(file) as { apps: { env: Record<string, string> }[] };
     const env = cfg.apps[0]!.env;

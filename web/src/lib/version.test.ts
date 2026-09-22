@@ -42,6 +42,31 @@ describe('compareBuild', () => {
     expect(r.reasons[0]).toMatch(/predates/);
   });
 
+  it('treats a dirty checkout as the same commit as a clean build', () => {
+    const r = compareBuild(
+      { version: '1.0.0', commit: 'abc1234' },
+      { version: '1.0.0', commit: 'abc1234-dirty' },
+    );
+    expect(r.stale).toBe(false);
+    expect(r.reasons).toEqual([]);
+  });
+
+  it('treats a dirty build as the same commit as a clean checkout', () => {
+    const r = compareBuild(
+      { version: '1.0.0', commit: 'abc1234-dirty' },
+      { version: '1.0.0', commit: 'abc1234' },
+    );
+    expect(r.stale).toBe(false);
+  });
+
+  it('still flags a different commit when one side is dirty', () => {
+    const r = compareBuild(
+      { version: '1.0.0', commit: 'deadbee' },
+      { version: '1.0.0', commit: 'abc1234-dirty' },
+    );
+    expect(r.stale).toBe(true);
+  });
+
   it('flags a commit mismatch', () => {
     const r = compareBuild({ version: '1.0.0', commit: 'deadbee' }, expected);
     expect(r.stale).toBe(true);

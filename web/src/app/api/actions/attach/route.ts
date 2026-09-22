@@ -50,6 +50,7 @@ export async function GET(req: Request) {
         type: 'snapshot',
         id: action.id,
         action: action.action,
+        label: action.label,
         command: action.command,
         started_at: action.startedAt,
         status: action.status,

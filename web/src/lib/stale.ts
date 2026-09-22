@@ -12,6 +12,10 @@ export type StaleInfo = {
 
 const LEFTOVER_LOCK_MIN_AGE_SECONDS = 20;
 
+export function lockIsHeldAlive(lock: RunLockFacts | null | undefined): boolean {
+  return lock?.present === true && lock.pid_alive === true;
+}
+
 export function computeStale(
   state: { status: string; requires_manual_resume: boolean } | null | undefined,
   lock: RunLockFacts | null | undefined,
@@ -25,7 +29,7 @@ export function computeStale(
     );
   }
 
-  if (lock?.present === true) {
+  if (lock?.present === true && !lockIsHeldAlive(lock)) {
     if (stateStatus === 'running') {
       if (lock.pid_alive === false) {
         items.push(

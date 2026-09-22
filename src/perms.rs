@@ -3,10 +3,70 @@ use crate::logger::Logger;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+fn clean(value: String) -> Option<String> {
+    let trimmed = value.trim().to_string();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+fn username_from_env(name: &str) -> Option<String> {
+    std::env::var(name).ok()
+}
+
+fn username_for_uid(uid: libc::uid_t) -> Option<String> {
+    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut buf = vec![0 as libc::c_char; 4096];
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+    let rc = unsafe {
+        libc::getpwuid_r(
+            uid,
+            &mut pwd,
+            buf.as_mut_ptr(),
+            buf.len(),
+            &mut result,
+        )
+    };
+    if rc != 0 || result.is_null() || pwd.pw_name.is_null() {
+        return None;
+    }
+    let name = unsafe { std::ffi::CStr::from_ptr(pwd.pw_name) }
+        .to_string_lossy()
+        .trim()
+        .to_string();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+fn username_from_id_command() -> Option<String> {
+    let out = Command::new("id").arg("-un").output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+fn resolve_user(env: &dyn Fn(&str) -> Option<String>, uid: libc::uid_t) -> Option<String> {
+    env("USER")
+        .and_then(clean)
+        .or_else(|| env("LOGNAME").and_then(clean))
+        .or_else(|| env("SUDO_USER").and_then(clean))
+        .or_else(|| username_for_uid(uid))
+        .or_else(username_from_id_command)
+}
+
 pub fn current_user() -> Option<String> {
-    std::env::var("USER")
-        .ok()
-        .filter(|u| !u.trim().is_empty())
+    resolve_user(&username_from_env, unsafe { libc::geteuid() })
 }
 
 pub fn source_dir(cfg: &Config) -> PathBuf {
@@ -111,5 +171,56 @@ pub fn ensure_access(cfg: &Config, user: &str, logger: &Logger) -> Result<(), St
             dest.display(),
             user
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{current_user, resolve_user, username_for_uid};
+
+    fn env_from<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |name: &str| {
+            pairs
+                .iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| (*v).to_string())
+        }
+    }
+
+    #[test]
+    fn uid_lookup_names_real_accounts() {
+        let root = username_for_uid(0).expect("uid 0 must resolve to a name");
+        assert_eq!(root, "root");
+    }
+
+    #[test]
+    fn a_scrubbed_environment_still_resolves_a_user() {
+        let resolved = resolve_user(&env_from(&[]), 0);
+        assert_eq!(resolved.as_deref(), Some("root"));
+    }
+
+    #[test]
+    fn blank_environment_values_fall_through_to_the_uid() {
+        let resolved = resolve_user(&env_from(&[("USER", "   "), ("LOGNAME", "")]), 0);
+        assert_eq!(resolved.as_deref(), Some("root"));
+    }
+
+    #[test]
+    fn the_environment_wins_when_it_is_set() {
+        let resolved = resolve_user(&env_from(&[("USER", "alice")]), 0);
+        assert_eq!(resolved.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn logname_is_used_when_user_is_missing() {
+        let resolved = resolve_user(&env_from(&[("LOGNAME", "bob")]), 0);
+        assert_eq!(resolved.as_deref(), Some("bob"));
+    }
+
+    #[test]
+    fn current_user_never_returns_a_blank_name() {
+        let user = current_user().expect("the running account must be identifiable");
+        assert!(!user.trim().is_empty());
+        assert_eq!(user, user.trim());
     }
 }

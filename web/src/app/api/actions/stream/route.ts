@@ -18,10 +18,11 @@ export async function POST(req: Request) {
 
   const prepared = await prepareAction(req, body);
   if (!prepared.ok) return prepared.response;
-  const { inst, args, command, timeout } = prepared;
+  const { inst, args, command, timeout, label } = prepared;
 
   const { action, alreadyRunning } = startAction(inst, {
     action: body?.action ?? '',
+    label,
     args,
     command: `${binaryPath()} ${[...args, '--config', inst.configPath].join(' ')}`,
     timeout,
@@ -29,10 +30,11 @@ export async function POST(req: Request) {
   if (alreadyRunning) {
     return NextResponse.json(
       {
-        error: 'an action is already running for this instance',
+        error: `“${action.label}” is already running for this instance`,
         running: true,
         id: action.id,
         action: action.action,
+        label: action.label,
         started_at: action.startedAt,
       },
       { status: 409 },

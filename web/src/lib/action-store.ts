@@ -14,6 +14,7 @@ export type StoredAction = {
   root: string;
   osUser: string;
   action: string;
+  label: string;
   command: string;
   startedAt: number;
   status: ActionStatus;
@@ -39,9 +40,17 @@ type Entry = {
 
 const entries = new Map<string, Entry>();
 
+function reconcile(entry: Entry): void {
+  if (entry.info.status !== 'running') return;
+  const child = entry.child;
+  if (child && child.exitCode === null && child.signalCode === null) return;
+  finish(entry, child?.exitCode ?? null, child?.signalCode ?? null);
+}
+
 function prune(root: string): Entry | null {
   const entry = entries.get(root);
   if (!entry) return null;
+  reconcile(entry);
   if (entry.info.status !== 'running' && Date.now() - entry.info.startedAt > KEEP_FINISHED_MS) {
     clearSinkless(entry);
     entries.delete(root);
@@ -124,6 +133,7 @@ function fail(entry: Entry, message: string): void {
 
 export type StartActionOptions = {
   action: string;
+  label?: string;
   args: string[];
   command: string;
   timeout: number;
@@ -145,6 +155,7 @@ export function startAction(
       root: inst.root,
       osUser: inst.osUser,
       action: opts.action,
+      label: opts.label ?? opts.action,
       command: opts.command,
       startedAt: Date.now(),
       status: 'running',
@@ -197,13 +208,20 @@ export function subscribeAction(
 }
 
 export function stopAction(root: string): boolean {
-  const entry = prune(root);
+  const entry = entries.get(root);
   if (!entry || entry.info.status !== 'running') return false;
-  if (entry.child && entry.child.exitCode === null) {
-    try {
-      entry.child.kill('SIGTERM');
-    } catch {
-    }
+  const child = entry.child;
+  if (!child) {
+    fail(entry, 'the run is no longer attached to the panel');
+    return true;
+  }
+  if (child.exitCode !== null || child.signalCode !== null) {
+    finish(entry, child.exitCode, child.signalCode);
+    return true;
+  }
+  try {
+    child.kill('SIGTERM');
+  } catch {
   }
   return true;
 }

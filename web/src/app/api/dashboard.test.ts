@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 
 let cookie = '';
@@ -427,9 +427,12 @@ describe('persistent actions across disconnects', () => {
         running?: boolean;
         id?: string;
         error?: string;
+        label?: string;
       };
       expect(body.running).toBe(true);
       expect(typeof body.id).toBe('string');
+      expect(body.label).toBe('Integrity check');
+      expect(body.error ?? '').toContain('Integrity check');
 
       const rest = await readRemaining(got.reader!, got.decoder);
       const last = rest[rest.length - 1];
@@ -462,5 +465,187 @@ describe('persistent actions across disconnects', () => {
       expect(snapshot.status).toBe('failed');
       expect(snapshot.signal).toBe('SIGTERM');
     });
+  });
+
+  const LEAKY = [
+    '#!/bin/sh',
+    'echo "started"',
+    'sleep 6 &',
+    'echo "parent is done"',
+    'exit 0',
+  ].join('\n');
+
+  it('settles an exited run whose output pipe is still held open', { timeout: 25000 }, async () => {
+    await withBin('leaky-holder', LEAKY, async () => {
+      const { POST } = await import('@/app/api/actions/stream/route');
+      const run = (await POST(streamRequest({ action: 'check' }))) as unknown as Response;
+      const got = await readUntilStarted(run);
+      expect(got.messages.some((m) => m.type === 'stdout')).toBe(true);
+
+      await new Promise((r) => setTimeout(r, 800));
+
+      const { GET } = await import('@/app/api/actions/attach/route');
+      const attach = (await GET(attachRequest())) as unknown as Response;
+      const snapshot = (await readAttach(attach))[0];
+      expect(snapshot.type).toBe('snapshot');
+      expect(snapshot.status).not.toBe('running');
+      expect(snapshot.exit_code).toBe(0);
+
+      await got.reader!.cancel();
+      await new Promise((r) => setTimeout(r, 300));
+    });
+  });
+
+  it('does not let a settled run block the next action', { timeout: 25000 }, async () => {
+    await withBin('leaky-holder-2', LEAKY, async () => {
+      const { POST } = await import('@/app/api/actions/stream/route');
+      const run = (await POST(streamRequest({ action: 'check' }))) as unknown as Response;
+      const got = await readUntilStarted(run);
+      await new Promise((r) => setTimeout(r, 800));
+
+      const second = (await POST(streamRequest({ action: 'check' }))) as unknown as Response;
+      expect(second.status).toBe(200);
+
+      await got.reader!.cancel();
+      const rest = await readRemaining(
+        second.body!.getReader(),
+        new TextDecoder(),
+      );
+      const last = rest[rest.length - 1];
+      expect(last.type).toBe('exit');
+    });
+  });
+});
+
+describe('encrypted restore gate', () => {
+  let plain = '';
+
+  function configPath(): string {
+    return path.join(instanceRoot, 'config.yml');
+  }
+
+  function setEncryption(enabled: boolean, passphrase = 'hunter2'): void {
+    fs.writeFileSync(
+      configPath(),
+      ['backup:', '  time: "03:30"', '  backups_per_day: 1', 'encrypt:', `  enabled: ${enabled}`, `  passphrase: "${passphrase}"`, ''].join(
+        '\n',
+      ),
+      { mode: 0o600 },
+    );
+  }
+
+  async function call(
+    mod: Record<string, unknown>,
+    method: string,
+    body?: unknown,
+  ): Promise<Response> {
+    const fn = mod[method] as (req: Request) => Promise<Response>;
+    return fn(
+      new Request('http://test/api/restore', {
+        method,
+        headers: { 'content-type': 'application/json', cookie },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      }) as never,
+    );
+  }
+
+  async function restoreRoutes() {
+    return (await import('@/app/api/restore/route')) as unknown as Record<string, unknown>;
+  }
+
+  async function unlockRoutes() {
+    return (await import('@/app/api/restore/unlock/route')) as unknown as Record<string, unknown>;
+  }
+
+  async function withJsonBinary<T>(fn: () => Promise<T>): Promise<T> {
+    const original = process.env.BACKUP_MGR_BIN;
+    const file = path.join(binDir, 'backup-json');
+    fs.writeFileSync(
+      file,
+      [
+        '#!/bin/sh',
+        `echo '[{"name":"x.tar.zst","source":"local","size":10}]'`,
+        'exit 0',
+        '',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+    process.env.BACKUP_MGR_BIN = file;
+    try {
+      return await fn();
+    } finally {
+      process.env.BACKUP_MGR_BIN = original;
+    }
+  }
+
+  beforeAll(async () => {
+    plain = fs.readFileSync(configPath(), 'utf8');
+    await call(await unlockRoutes(), 'DELETE');
+  });
+
+  afterAll(() => {
+    fs.writeFileSync(configPath(), plain, { mode: 0o600 });
+  });
+
+  it('restores straight away while encryption is off', async () => {
+    setEncryption(false);
+    await call(await unlockRoutes(), 'DELETE');
+    const { POST } = await import('@/app/api/actions/stream/route');
+    const res = (await POST(streamRequest({ action: 'restore', options: { file: 'x.tar.zst' } }))) as unknown as Response;
+    expect(res.status).toBe(200);
+    await readStream(res);
+  });
+
+  it('withholds an encrypted restore until the passphrase is confirmed', async () => {
+    setEncryption(true);
+    await call(await unlockRoutes(), 'DELETE');
+
+    const { POST } = await import('@/app/api/actions/stream/route');
+    const blocked = (await POST(
+      streamRequest({ action: 'restore', options: { file: 'x.tar.zst' } }),
+    )) as unknown as Response;
+    expect(blocked.status).toBe(428);
+    const body = (await blocked.json()) as { passphrase_required?: boolean; error?: string };
+    expect(body.passphrase_required).toBe(true);
+    expect(body.error).toContain('passphrase');
+
+    await withJsonBinary(async () => {
+      const list = await call(await restoreRoutes(), 'GET');
+      expect(list.status).toBe(200);
+      const listed = (await list.json()) as {
+        backups: { name: string }[];
+        encryption: { enabled: boolean; has_passphrase: boolean };
+        unlocked_until: string | null;
+      };
+      expect(listed.backups.map((b) => b.name)).toEqual(['x.tar.zst']);
+      expect(listed.encryption.enabled).toBe(true);
+      expect(listed.encryption.has_passphrase).toBe(true);
+      expect(listed.unlocked_until).toBeNull();
+    });
+
+    const wrong = await call(await unlockRoutes(), 'POST', { passphrase: 'nope' });
+    expect(wrong.status).toBe(401);
+
+    const right = await call(await unlockRoutes(), 'POST', { passphrase: 'hunter2' });
+    expect(right.status).toBe(200);
+    expect((await right.json()) as { ok: boolean }).toMatchObject({ ok: true });
+
+    const allowed = (await POST(
+      streamRequest({ action: 'restore', options: { file: 'x.tar.zst' } }),
+    )) as unknown as Response;
+    expect(allowed.status).toBe(200);
+    await readStream(allowed);
+  });
+
+  it('forgets the confirmation when it is dropped', async () => {
+    setEncryption(true);
+    const dropped = await call(await unlockRoutes(), 'DELETE');
+    expect((await dropped.json()) as { cleared: number }).toMatchObject({ cleared: 1 });
+
+    const { POST } = await import('@/app/api/actions/stream/route');
+    const blocked = (await POST(
+      streamRequest({ action: 'restore', options: { file: 'x.tar.zst' } }),
+    )) as unknown as Response;
+    expect(blocked.status).toBe(428);
   });
 });
